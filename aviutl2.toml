@@ -1,0 +1,29 @@
+[project]
+id = "halkun19.HL_Ezing"
+name = "HL_Ezing"
+version = "0.1.0"
+
+[development]
+aviutl2_version = "latest"
+
+[artifacts.HL_Ezing-aux2]
+destination = "Plugin/HL_Ezing.aux2"
+
+[artifacts.HL_Ezing-aux2.profiles.debug]
+build = ["npm --prefix frontend install", "npm --prefix frontend run build", "cargo build"]
+source = "target/debug/hl_ezing.dll"
+
+[artifacts.HL_Ezing-aux2.profiles.release]
+build = ["npm --prefix frontend install", "npm --prefix frontend run build", "cargo build --release"]
+source = "target/release/hl_ezing.dll"
+
+[artifacts.HL_Ezing-tra2]
+source = "script/HL_Ezing.tra2"
+destination = "Script/HL_Ezing/HL_Ezing.tra2"
+
+[release]
+output_dir = "release"
+package_id = "halkun19.HL_Ezing"
+package_name = "HL_Ezing"
+package_information = "HL_Ezing v{version}"
+zip_name = "HL_Ezing-v{version}"

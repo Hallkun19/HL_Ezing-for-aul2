@@ -1,0 +1,22 @@
+--param:Curve ID,0
+--param:Nonce,0
+--information:HL_Ezing curve evaluator by halkun19
+
+local curve_id, nonce = obj.getpoint("param")
+
+if curve_id == 0 or curve_id == nil then
+    return obj.getpoint("default")
+end
+
+local idx, t = math.modf(obj.getpoint("index"))
+local st = obj.getpoint(idx)
+local ed = obj.getpoint(idx + 1)
+local m = obj.module("HL_Ezing.aux2") or obj.module("HL_Ezing")
+if not m or not m.getcurve then
+    return st + (ed - st) * t
+end
+local v = m.getcurve(curve_id, nonce or 0, t)
+if v == nil then
+    return st + (ed - st) * t
+end
+return st + (ed - st) * v

@@ -1,0 +1,23 @@
+# Rust
+/target
+
+# AviUtl2 CLI
+/.aviutl2-cli
+/release
+
+# Node / Frontend
+/frontend/node_modules
+/frontend/dist
+/ui-react
+/ui
+
+# Local & Temporary files
+/feedback
+how_to_make_aul2_plugin.md
+マスター指示.txt
+
+
+
+# OS / System
+.DS_Store
+Thumbs.db
