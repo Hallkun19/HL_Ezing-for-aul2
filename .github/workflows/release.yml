@@ -54,6 +54,11 @@ jobs:
       - name: Install AviUtl2 CLI (au2) via cargo binstall
         run: cargo binstall aviutl2-cli --no-confirm
 
+      - name: Build Frontend
+        run: |
+          npm install --prefix frontend
+          npm run build --prefix frontend
+
       - name: Build & Package with au2 release
         run: au2 release
 
