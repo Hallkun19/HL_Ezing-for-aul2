@@ -38,7 +38,7 @@ HL_Ezing は、AviUtl2 のトラックバーに対してベジェ、振動（Ela
 ## インストール方法
 
 1. リリースパッケージを [Releases](https://github.com/Hallkun19/HL_Ezing-for-aul2/releases/latest) からダウンロードします
-2. AviUtl2上にダウンロードしたリリースパッケージをドラッグアンドドロップして、インストールします
+2. ダウンロードしたリリースパッケージを、AviUtl2のウィンドウへドラッグアンドドロップしてインストールします
 
 ---
 
