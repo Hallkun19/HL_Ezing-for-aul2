@@ -109,7 +109,9 @@ HL_Ezing は、AviUtl2 のトラックバーに対してベジェ、振動（Ela
 
 ---
 
-## ライセンス / クレジット
+## クレジット
 
-- **制作者**: はるくん / harukun19
-- **
+- [aviutl-plugin-curve_editor](https://github.com/mimaraka/aviutl-plugin-curve_editor) : mimaraka 様
+- [enhanced_tracks.aux2](https://github.com/sevenc-nanashi/enhanced_tracks.aux2) : sevenc-nanashi 様
+
+上記のリポジトリを参考にさせていただきました。
