@@ -48,8 +48,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-build-
 
-      - name: Install AviUtl2 CLI (au2)
-        run: cargo install aviutl2-cli
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install AviUtl2 CLI (au2) via cargo binstall
+        run: cargo binstall aviutl2-cli --no-confirm
 
       - name: Build & Package with au2 release
         run: au2 release
