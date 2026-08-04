@@ -51,7 +51,7 @@ jobs:
       - name: Install cargo-binstall
         uses: cargo-bins/cargo-binstall@main
 
-      - name: Install AviUtl2 CLI (au2) via cargo binstall
+      - name: Install AviUtl2 CLI via cargo binstall
         run: cargo binstall aviutl2-cli --no-confirm
 
       - name: Build Frontend
