@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 import {
   MdCenterFocusWeak,
@@ -127,11 +127,13 @@ function solveX(x, c1, c2) {
 }
 
 function evalBezier(data, x) {
-  if (x <= 0) return 0;
-  if (x >= 1) return 1;
-  for (let i = 0; i < data.points.length - 1; i++) {
-    const a = data.points[i];
-    const b = data.points[i + 1];
+  const pts = data.points;
+  if (!pts.length) return x;
+  if (x <= pts[0].anchor[0]) return pts[0].anchor[1];
+  if (x >= pts[pts.length - 1].anchor[0]) return pts[pts.length - 1].anchor[1];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
     if (x < a.anchor[0] || x > b.anchor[0]) continue;
     const w = b.anchor[0] - a.anchor[0];
     if (w < 1e-6) return a.anchor[1];
@@ -164,7 +166,7 @@ function evalBezier(data, x) {
       b.anchor[1]
     );
   }
-  return 1;
+  return pts[pts.length - 1].anchor[1];
 }
 
 function clampHandles(points) {
@@ -179,6 +181,38 @@ function clampHandles(points) {
       p.outHandle[0] = clamp(p.outHandle[0], p.anchor[0], nextX);
     }
   }
+}
+
+// ポップアップメニューの位置をウィンドウ領域内に収める
+function ClampedMenu({ x, y, className, children, onMouseDown, onClick }) {
+  const ref = useRef(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) {
+      setPos({ left: x, top: y });
+      return;
+    }
+    const rect = el.getBoundingClientRect();
+    const margin = 4;
+    const maxLeft = window.innerWidth - rect.width - margin;
+    const maxTop = window.innerHeight - rect.height - margin;
+    setPos({
+      left: Math.max(margin, Math.min(x, maxLeft)),
+      top: Math.max(margin, Math.min(y, maxTop)),
+    });
+  }, [x, y]);
+  return (
+    <div
+      ref={ref}
+      className={className}
+      style={{ left: pos.left, top: pos.top }}
+      onMouseDown={onMouseDown}
+      onClick={onClick}
+    >
+      {children}
+    </div>
+  );
 }
 
 function Graph({ state, setState, settings }) {
@@ -548,18 +582,20 @@ function Graph({ state, setState, settings }) {
 
   const moveAnchor = (index, value) => {
     const pts = clone(state.bezierData.points);
-    if (index === 0 || index === pts.length - 1) return;
-    const minGap = 0.02;
     const old = pts[index].anchor;
-    const min = pts[index - 1].anchor[0] + minGap;
-    const max = pts[index + 1].anchor[0] - minGap;
-    const x = clamp(
-      keys.current.shift
-        ? Math.round(value[0] * settings.gridLinesX) / settings.gridLinesX
-        : value[0],
-      min,
-      max
-    );
+    const first = index === 0;
+    const last = index === pts.length - 1;
+
+    // 端点はXを固定(0/1)してYのみ移動、中間点はXも移動可能
+    let x = old[0];
+    if (!first && !last) {
+      const minGap = 0.02;
+      const min = pts[index - 1].anchor[0] + minGap;
+      const max = pts[index + 1].anchor[0] - minGap;
+      x = clamp(value[0], min, max);
+    }
+    // XのスナップはCtrl(Ctrl→X)のみ。ShiftはY軸スナップ専用
+    const y = value[1];
 
     const origHandles = drag.current?.originalHandles;
     for (let i = 0; i < pts.length; i++) {
@@ -598,13 +634,15 @@ function Graph({ state, setState, settings }) {
     const r = ref.current.getBoundingClientRect();
     const x = e.clientX - r.left;
     const y = e.clientY - r.top;
-    if (e.button === 1 || (e.button === 0 && keys.current.alt)) {
+    if (e.button === 1) {
       drag.current = { kind: "pan", x, y, view: clone(view.current) };
       return;
     }
     if (e.button === 0) {
       const h = hit(x, y);
       if (h) {
+        // Altを押しながらのドラッグでも、ハンドル・アンカーを掴んだら
+        // そちらを優先して操作する(Altはハンドルの個別独立操作用)
         let originalHandles = null;
         if (state.mode === "bezier") {
           originalHandles = state.bezierData.points.map((p) => ({
@@ -615,6 +653,9 @@ function Graph({ state, setState, settings }) {
           }));
         }
         drag.current = { ...h, originalHandles };
+      } else if (keys.current.alt) {
+        // 何も掴んでいない場合のみ Altドラッグでパン
+        drag.current = { kind: "pan", x, y, view: clone(view.current) };
       }
     }
   };
@@ -852,9 +893,10 @@ function Graph({ state, setState, settings }) {
         onContextMenu={handleContextMenu}
       />
       {contextMenu && (
-        <div
+        <ClampedMenu
           className="context-menu"
-          style={{ top: contextMenu.y, left: contextMenu.x }}
+          x={contextMenu.x}
+          y={contextMenu.y}
           onClick={(e) => e.stopPropagation()}
         >
           {["bezier", "elastic", "bounce"].map((type) => (
@@ -913,7 +955,7 @@ function Graph({ state, setState, settings }) {
                 </button>
               </>
             )}
-        </div>
+        </ClampedMenu>
       )}
     </div>
   );
@@ -1026,9 +1068,10 @@ function Presets({ presets, setPresets, setState, settings, style }) {
         ))}
       </div>
       {presetMenu && (
-        <div
+        <ClampedMenu
           className="context-menu"
-          style={{ top: presetMenu.y, left: presetMenu.x }}
+          x={presetMenu.x}
+          y={presetMenu.y}
           onClick={(e) => e.stopPropagation()}
         >
           <button
@@ -1040,7 +1083,7 @@ function Presets({ presets, setPresets, setState, settings, style }) {
           >
             <MdDelete /> プリセットの削除
           </button>
-        </div>
+        </ClampedMenu>
       )}
     </aside>
   );
@@ -1240,6 +1283,8 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [panelSize, setPanelSize] = useState(settings.presetPanelSize || 200);
   const resizing = useRef(false);
+  const applyWrapRef = useRef(null);
+  const [pickerMaxHeight, setPickerMaxHeight] = useState(200);
 
   useEffect(() => {
     localStorage.setItem("hl_ezing.react.settings", JSON.stringify(settings));
@@ -1288,6 +1333,21 @@ function App() {
   }, [handleResizeMove, panelSize]);
 
   const [trackPicker, setTrackPicker] = useState(null); // { tracks: [...] }
+
+  // トラックピッカーの高さをウィンドウ領域内に収める
+  useEffect(() => {
+    if (!trackPicker) return;
+    const measure = () => {
+      const el = applyWrapRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const available = rect.bottom - 38 - 6; // ピッカー下端はボタン上38px、上端余白6px
+      setPickerMaxHeight(Math.max(40, Math.min(200, available)));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [trackPicker]);
 
   // トラックピッカー外部クリックで閉じる
   useEffect(() => {
@@ -1464,7 +1524,7 @@ function App() {
         </header>
         <Graph state={state} setState={setState} settings={settings} />
         <footer className="floating-footer">
-          <div className="apply-wrap">
+          <div className="apply-wrap" ref={applyWrapRef}>
             <button
               className="apply-btn"
               onClick={handleApplyClick}
@@ -1475,6 +1535,7 @@ function App() {
             {trackPicker && (
               <div
                 className="track-picker"
+                style={{ maxHeight: `${pickerMaxHeight}px` }}
                 onMouseDown={(e) => e.stopPropagation()}
               >
                 {trackPicker.tracks.map((t, i) => (

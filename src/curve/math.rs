@@ -38,16 +38,19 @@ fn solve_cubic_bezier_t(x: f64, c1x: f64, c2x: f64) -> f64 {
 ///
 /// セグメントはアンカーのx座標で区間を判定し、セグメント種別(bezier/elastic/bounce)に応じて
 /// 評価する。yはアンカーの絶対座標で補間する（original_backupのサムネイル描画と同一の挙動）。
+/// 始点・終点のアンカーはYを上下に動かせるため、端ではそのアンカーのYを返す。
 pub fn evaluate_bezier(data: &BezierData, t: f64) -> f64 {
-    if t <= 0.0 {
-        return 0.0;
-    }
-    if t >= 1.0 {
-        return 1.0;
-    }
     let points = &data.points;
     if points.len() < 2 {
         return t;
+    }
+    let first = &points[0];
+    let last = &points[points.len() - 1];
+    if t <= first.anchor[0] {
+        return first.anchor[1];
+    }
+    if t >= last.anchor[0] {
+        return last.anchor[1];
     }
     for i in 0..points.len() - 1 {
         let p_start = &points[i];
@@ -56,7 +59,7 @@ pub fn evaluate_bezier(data: &BezierData, t: f64) -> f64 {
             return evaluate_segment(p_start, p_end, t);
         }
     }
-    1.0
+    last.anchor[1]
 }
 
 fn evaluate_segment(p_start: &BezierPoint, p_end: &BezierPoint, t: f64) -> f64 {
@@ -284,5 +287,34 @@ mod tests {
         assert!(approx(cubic_bezier(0.5, 0.0, 0.0, 1.0, 1.0), 0.5));
         assert!(approx(cubic_bezier(0.0, 0.0, 0.0, 1.0, 1.0), 0.0));
         assert!(approx(cubic_bezier(1.0, 0.0, 0.0, 1.0, 1.0), 1.0));
+    }
+
+    #[test]
+    fn bezier_endpoints_moveable_vertical() {
+        // 始点Y=0.3, 終点Y=0.9 の直線カーブ。端ではそのYを返す
+        let data = BezierData {
+            points: vec![
+                BezierPoint {
+                    anchor: [0.0, 0.3],
+                    in_handle: [0.0, 0.3],
+                    out_handle: [1.0 / 3.0, 0.5],
+                    out_type: "bezier".into(),
+                    out_elastic: None,
+                    out_bounce: None,
+                },
+                BezierPoint {
+                    anchor: [1.0, 0.9],
+                    in_handle: [2.0 / 3.0, 0.7],
+                    out_handle: [1.0, 0.9],
+                    out_type: "bezier".into(),
+                    out_elastic: None,
+                    out_bounce: None,
+                },
+            ],
+        };
+        assert!(approx(evaluate_bezier(&data, 0.0), 0.3));
+        assert!(approx(evaluate_bezier(&data, 1.0), 0.9));
+        // 直線(比例ハンドル)なら中間も端点間を線形に補間
+        assert!((evaluate_bezier(&data, 0.5) - 0.6).abs() < 1e-6);
     }
 }
