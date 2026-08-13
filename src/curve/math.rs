@@ -17,21 +17,36 @@ pub fn cubic_bezier(t: f64, p0: f64, p1: f64, p2: f64, p3: f64) -> f64 {
 }
 
 /// 3次ベジェのx=tとなるtをニュートン法で求める（xは0..1に正規化済み）。
+/// ハンドルが端点近くに固まっているとニュートン法が収束しないことがあるため、
+/// 収束しない場合は二分法で厳密に解く。
 fn solve_cubic_bezier_t(x: f64, c1x: f64, c2x: f64) -> f64 {
-    let mut t2 = x;
+    let mut t = x;
     for _ in 0..8 {
-        let x2 = cubic_bezier(t2, 0.0, c1x, c2x, 1.0) - x;
-        if x2.abs() < 1e-6 {
-            return t2;
+        let e = cubic_bezier(t, 0.0, c1x, c2x, 1.0) - x;
+        if e.abs() < 1e-6 {
+            return t.clamp(0.0, 1.0);
         }
         let derivative =
-            (3.0 * c1x - 6.0 * c2x + 3.0) * t2 * t2 + (-6.0 * c1x + 6.0 * c2x) * t2 + 3.0 * c1x;
+            (3.0 * c1x - 6.0 * c2x + 3.0) * t * t + (-6.0 * c1x + 6.0 * c2x) * t + 3.0 * c1x;
         if derivative.abs() < 1e-6 {
             break;
         }
-        t2 -= x2 / derivative;
+        t -= e / derivative;
     }
-    t2
+    if (cubic_bezier(t, 0.0, c1x, c2x, 1.0) - x).abs() < 1e-6 {
+        return t.clamp(0.0, 1.0);
+    }
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    for _ in 0..60 {
+        let mid = (lo + hi) * 0.5;
+        if cubic_bezier(mid, 0.0, c1x, c2x, 1.0) < x {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo + hi) * 0.5
 }
 
 /// 複数アンカーのベジェカーブを評価する。
@@ -316,5 +331,43 @@ mod tests {
         assert!(approx(evaluate_bezier(&data, 1.0), 0.9));
         // 直線(比例ハンドル)なら中間も端点間を線形に補間
         assert!((evaluate_bezier(&data, 0.5) - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bezier_bunched_handles_no_jump() {
+        // 始点・始点のハンドル・次の点のハンドルが同じY(=0)で、両ハンドルが
+        // Xも端点近く(0.99)に固まっているケース。旧ニュートン法は収束せず
+        // カーブが跳ね上がっていたが、二分法フォールバックにより滑らかになる。
+        let data = BezierData {
+            points: vec![
+                BezierPoint {
+                    anchor: [0.0, 0.0],
+                    in_handle: [0.0, 0.0],
+                    out_handle: [0.99, 0.0],
+                    out_type: "bezier".into(),
+                    out_elastic: None,
+                    out_bounce: None,
+                },
+                BezierPoint {
+                    anchor: [1.0, 1.0],
+                    in_handle: [0.99, 0.0],
+                    out_handle: [1.0, 1.0],
+                    out_type: "bezier".into(),
+                    out_elastic: None,
+                    out_bounce: None,
+                },
+            ],
+        };
+        // 全域で単調増加(跳ね上がりなし)
+        let mut prev = -1.0;
+        for i in 0..=200 {
+            let t = i as f64 / 200.0;
+            let y = evaluate_bezier(&data, t);
+            assert!(y >= prev - 1e-9, "not monotonic at t={t}: {y} < {prev}");
+            prev = y;
+        }
+        // 参照値(二分法で厳密解): x=0.9 で約0.16、旧実装は0.31前後まで跳ね上がっていた
+        let v = evaluate_bezier(&data, 0.9);
+        assert!((v - 0.164).abs() < 0.01, "unexpected jump: y(0.9)={v}");
     }
 }

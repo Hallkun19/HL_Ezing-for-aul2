@@ -117,13 +117,22 @@ function solveX(x, c1, c2) {
   let t = x;
   for (let i = 0; i < 8; i++) {
     const e = cubic(t, 0, c1, c2, 1) - x;
-    if (Math.abs(e) < 1e-6) break;
+    if (Math.abs(e) < 1e-6) return clamp(t, 0, 1);
     const d =
       (3 * c1 - 6 * c2 + 3) * t * t + (-6 * c1 + 6 * c2) * t + 3 * c1;
     if (Math.abs(d) < 1e-6) break;
     t -= e / d;
   }
-  return clamp(t, 0, 1);
+  if (Math.abs(cubic(t, 0, c1, c2, 1) - x) < 1e-6) return clamp(t, 0, 1);
+  // ニュートン法が収束しない場合(ハンドルが端点近くに固まっている場合など)は二分法で厳密に解く
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (cubic(mid, 0, c1, c2, 1) < x) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
 }
 
 function evalBezier(data, x) {
@@ -1385,7 +1394,7 @@ function App() {
         doApply(null);
       } else if (tracks.length === 1) {
         // 1つしかない場合はそのまま適用
-        doApply(tracks[0].item);
+        doApply(tracks[0].item, tracks[0].effect, tracks[0].effect_index);
       } else {
         // 複数ある場合はピッカーを表示
         setTrackPicker({ tracks });
@@ -1395,7 +1404,7 @@ function App() {
     window.ipc?.postMessage(JSON.stringify({ cmd: "get_tracks" }));
   };
 
-  const doApply = (itemName) => {
+  const doApply = (itemName, effectName, effectIndex) => {
     const data =
       state.mode === "bezier"
         ? state.bezierData
@@ -1404,6 +1413,8 @@ function App() {
           : state.bounceData;
     const msg = { cmd: "apply", mode: state.mode, data: clone(data) };
     if (itemName) msg.item_name = itemName;
+    if (effectName) msg.effect_name = effectName;
+    if (effectIndex != null) msg.effect_index = effectIndex;
     window.ipc?.postMessage(JSON.stringify(msg));
     setTrackPicker(null);
   };
@@ -1545,7 +1556,7 @@ function App() {
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
-                      doApply(t.item);
+                      doApply(t.item, t.effect, t.effect_index);
                       if (!e.shiftKey) setTrackPicker(null);
                     }}
                   >

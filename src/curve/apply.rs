@@ -16,10 +16,14 @@ pub const SCRIPT_MODE_NAME: &str = "HL_Ezing";
 pub const PROJECT_KEY: &str = "hl_ezing_curves";
 
 /// 指定またはフォーカスされている単一のトラックバーだけにカーブを適用する（全プロパティ適用を防止）。
-/// `target_item` が指定されている場合はその特定項目のみに、指定がない場合は最初のアニメトラック1本のみに適用する。
+/// `target_effect` / `target_effect_index` / `target_item` が指定されている場合は、
+/// そのエフェクト(インスタンス)・項目名に一致するものだけに適用する。
+/// 指定がない場合は最初のアニメトラック1本のみに適用する。
 pub fn apply_to_single_track(
     edit: &EditSection,
     curve_id: u64,
+    target_effect: Option<&str>,
+    target_effect_index: Option<usize>,
     target_item: Option<&str>,
 ) -> Result<usize, String> {
     let mut objects = edit.get_selected_objects().map_err(|e| e.to_string())?;
@@ -33,8 +37,26 @@ pub fn apply_to_single_track(
     };
 
     let effects = edit.get_effects(*object).map_err(|e| e.to_string())?;
+    // 同名エフェクトのインスタンスを区別するための名前別インデックス
+    let mut seen = std::collections::HashMap::<String, usize>::new();
     for effect in effects {
         let name = edit.get_effect_name(effect).map_err(|e| e.to_string())?;
+        let idx = seen.entry(name.clone()).or_insert(0);
+        // エフェクト名が指定されている場合は一致するものだけに絞る
+        // (同じ名前のトラックバーが複数ある場合、誤って最初の1本に適用されるのを防ぐ)
+        if let Some(target_effect) = target_effect {
+            if name != target_effect {
+                *idx += 1;
+                continue;
+            }
+        }
+        if let Some(target_index) = target_effect_index {
+            if *idx != target_index {
+                *idx += 1;
+                continue;
+            }
+        }
+        *idx += 1;
         let Ok(items) = crate::ipc::EDIT_HANDLE.get_effect_items(&name) else {
             continue;
         };
@@ -59,7 +81,7 @@ pub fn apply_to_single_track(
 
 /// 選択中オブジェクトへのカーブ適用（単一プロパティ限定）。
 pub fn apply_to_selection(edit: &EditSection, curve_id: u64) -> Result<usize, String> {
-    apply_to_single_track(edit, curve_id, None)
+    apply_to_single_track(edit, curve_id, None, None, None)
 }
 
 /// 指定された設定項目だけにカーブを適用する。Curve Editor風の右クリックメニュー用。

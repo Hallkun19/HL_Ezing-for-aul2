@@ -98,8 +98,22 @@ fn handle_get_tracks() {
 
         let mut tracks = Vec::<serde_json::Value>::new();
         let effects = edit.get_effects(*object).map_err(|e| e.to_string())?;
+        // 同名エフェクトが複数ある場合にラベルを区別するための出現回数
+        let mut counts = std::collections::HashMap::<String, usize>::new();
+        for effect in &effects {
+            let name = edit.get_effect_name(*effect).map_err(|e| e.to_string())?;
+            *counts.entry(name).or_insert(0) += 1;
+        }
+        let mut seen = std::collections::HashMap::<String, usize>::new();
         for effect in effects {
             let effect_name = edit.get_effect_name(effect).map_err(|e| e.to_string())?;
+            let idx = *seen.entry(effect_name.clone()).or_insert(0);
+            *seen.entry(effect_name.clone()).or_insert(0) += 1;
+            let suffix = if counts.get(&effect_name).copied().unwrap_or(0) > 1 {
+                format!(" ({})", idx + 1)
+            } else {
+                String::new()
+            };
             let Ok(items) = EDIT_HANDLE.get_effect_items(&effect_name) else {
                 continue;
             };
@@ -109,8 +123,9 @@ fn handle_get_tracks() {
                 }
                 tracks.push(serde_json::json!({
                     "effect": effect_name,
+                    "effect_index": idx,
                     "item": item.name,
-                    "label": format!("{} / {}", effect_name, item.name),
+                    "label": format!("{} / {}{}", effect_name, item.name, suffix),
                 }));
             }
         }
@@ -135,9 +150,17 @@ fn handle_drop(value: &serde_json::Value) {
     let Some(curve_id) = curve::registry::last_applied() else {
         return;
     };
+    let target_effect = value.get("effect_name").and_then(|i| i.as_str());
+    let target_effect_index = value.get("effect_index").and_then(|i| i.as_u64());
     let target_item = value.get("item_name").and_then(|i| i.as_str());
     let result = EDIT_HANDLE.call_edit_section(|edit| {
-        curve::apply::apply_to_single_track(edit, curve_id, target_item)
+        curve::apply::apply_to_single_track(
+            edit,
+            curve_id,
+            target_effect,
+            target_effect_index.map(|i| i as usize),
+            target_item,
+        )
     });
     match result {
         Ok(Ok(count)) => {
@@ -164,6 +187,8 @@ fn handle_apply(value: &serde_json::Value) {
         .get("data")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
+    let target_effect = value.get("effect_name").and_then(|i| i.as_str());
+    let target_effect_index = value.get("effect_index").and_then(|i| i.as_u64());
     let target_item = value.get("item_name").and_then(|i| i.as_str());
 
     // Curveはmodeタグ付きenumなので、modeを付与してデシリアライズする
@@ -186,7 +211,13 @@ fn handle_apply(value: &serde_json::Value) {
     curve::registry::set_last_applied(curve_id);
 
     let result = EDIT_HANDLE.call_edit_section(|edit| {
-        curve::apply::apply_to_single_track(edit, curve_id, target_item)
+        curve::apply::apply_to_single_track(
+            edit,
+            curve_id,
+            target_effect,
+            target_effect_index.map(|i| i as usize),
+            target_item,
+        )
     });
     match result {
         Ok(Ok(count)) => {
