@@ -2,15 +2,26 @@
 --param:Nonce,0
 --information:HL_Ezing curve evaluator by halkun19
 
-local curve_id, nonce = obj.getpoint("param")
+local gp = obj.getpoint
+local curve_id, nonce = gp("param")
 
-if curve_id == 0 or curve_id == nil then
-    return obj.getpoint("default")
+if curve_id == nil then
+    return gp("default")
 end
 
-local idx, t = math.modf(obj.getpoint("index"))
-local st = obj.getpoint(idx)
-local ed = obj.getpoint(idx + 1)
+local idx, t = math.modf(gp("index"))
+local num = gp("num")
+if num and num > 1 then
+    -- 最終区間の端で idx + 1 が範囲外にならないようにする。
+    if idx < 0 then
+        idx, t = 0, 0
+    elseif idx >= num - 1 then
+        idx, t = num - 2, 1
+    end
+end
+
+local st = gp(idx)
+local ed = gp(idx + 1)
 local m = obj.module("HL_Ezing.aux2") or obj.module("HL_Ezing")
 if not m or not m.getcurve then
     return st + (ed - st) * t

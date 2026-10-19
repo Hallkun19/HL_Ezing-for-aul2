@@ -82,7 +82,7 @@ fn evaluate_segment(p_start: &BezierPoint, p_end: &BezierPoint, t: f64) -> f64 {
     if segment_duration.abs() < 1e-6 {
         return p_start.anchor[1];
     }
-    let local_t = (t - p_start.anchor[0]) / segment_duration;
+    let local_t = ((t - p_start.anchor[0]) / segment_duration).clamp(0.0, 1.0);
     let seg_type = p_start.out_type.as_str();
     match seg_type {
         "elastic" => {
@@ -104,8 +104,9 @@ fn evaluate_segment(p_start: &BezierPoint, p_end: &BezierPoint, t: f64) -> f64 {
             }
         }
         _ => {
-            let x1 = (p_start.out_handle[0] - p_start.anchor[0]) / segment_duration;
-            let x2 = (p_end.in_handle[0] - p_start.anchor[0]) / segment_duration;
+            let x1 =
+                ((p_start.out_handle[0] - p_start.anchor[0]) / segment_duration).clamp(0.0, 1.0);
+            let x2 = ((p_end.in_handle[0] - p_start.anchor[0]) / segment_duration).clamp(0.0, 1.0);
             let t_for_x = solve_cubic_bezier_t(local_t, x1, x2);
             cubic_bezier(
                 t_for_x,
@@ -120,12 +121,28 @@ fn evaluate_segment(p_start: &BezierPoint, p_end: &BezierPoint, t: f64) -> f64 {
 
 /// 弾性カーブ。AE版HL_Ezing2の`cppElastic`の移植。
 pub fn elastic(p: f64, amplitude: f64, frequency: f64, decay: f64, reversed: bool) -> f64 {
-    if p <= 0.0 {
+    if !p.is_finite() || p <= 0.0 {
         return 0.0;
     }
     if p >= 1.0 {
         return 1.0;
     }
+    let amplitude = if amplitude.is_finite() {
+        amplitude.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    // JS 側のプレビューと同じく 0 除算を避ける。
+    let frequency = if frequency.is_finite() {
+        frequency.clamp(0.001, 1000.0)
+    } else {
+        2.0
+    };
+    let decay = if decay.is_finite() {
+        decay.clamp(0.0, 100.0)
+    } else {
+        5.0
+    };
     let mut p = p;
     if reversed {
         p = 1.0 - p;
@@ -172,7 +189,15 @@ pub fn elastic(p: f64, amplitude: f64, frequency: f64, decay: f64, reversed: boo
 
     let mut et = (0.5 - (decay / frequency).sqrt() * 0.05) / frequency;
     for _ in 0..3 {
-        et -= d1(et, decay) / d2(et, decay);
+        let derivative = d2(et, decay);
+        if !derivative.is_finite() || derivative.abs() < 1e-8 {
+            break;
+        }
+        let next = et - d1(et, decay) / derivative;
+        if !next.is_finite() {
+            break;
+        }
+        et = next;
     }
     let ex = fn_(et, decay);
     let tmp = fn_(p, decay);
@@ -186,15 +211,18 @@ pub fn elastic(p: f64, amplitude: f64, frequency: f64, decay: f64, reversed: boo
 
 /// バウンスカーブ。AE版HL_Ezing2の`cppBounce`の移植。
 pub fn bounce(p: f64, cor: f64, period: f64, reversed: bool) -> f64 {
-    if p <= 0.0 {
+    if !p.is_finite() || p <= 0.0 {
         return 0.0;
     }
     if p >= 1.0 {
         return 1.0;
     }
-    // cor=1.0(完全弾性)は式が退化するため上限を詰める。
-    let c = cor.clamp(0.0, 0.999999);
-    let d = period.max(0.0001);
+    // cor=0.0 は log(0) で NaN になるため、ごく小さな正値に詰める。
+    // cor=1.0(完全弾性)も式が退化するため上限を詰める。
+    let cor = if cor.is_finite() { cor } else { 0.5 };
+    let c = cor.clamp(0.000001, 0.999999);
+    let period = if period.is_finite() { period } else { 0.5 };
+    let d = period.clamp(0.0001, 100.0);
     let mut p = p;
     if reversed {
         p = 1.0 - p;

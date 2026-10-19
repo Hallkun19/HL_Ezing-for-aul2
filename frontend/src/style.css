@@ -109,31 +109,21 @@ button:active {
   gap: 5px;
 }
 
-.modes {
-  display: flex;
-  gap: 3px;
-  padding: 3px;
-  background: rgba(29, 29, 29, 0.92);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--border-color);
-  border-radius: 5px;
+.mode-select {
   flex: 1;
-}
-
-.modes button {
-  flex: 1;
-  padding: 5px 8px;
+  height: 32px;
+  padding: 0 8px;
+  color: #e2e8f0;
   font-size: 11px;
   font-weight: 500;
-  background: transparent;
-  border: none;
-  color: #a0aec0;
-  border-radius: 3px;
+  background: #1d1d1d;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  cursor: pointer;
 }
 
-.modes button.active {
-  color: #ffffff;
-  background: var(--accent-color);
+.mode-select:focus {
+  border-color: var(--accent-color);
 }
 
 .icon-button {
@@ -141,10 +131,37 @@ button:active {
   height: 32px;
   padding: 0;
   font-size: 16px;
-  background: rgba(29, 29, 29, 0.92);
-  backdrop-filter: blur(8px);
+  background: #1d1d1d;
   border: 1px solid var(--border-color);
   border-radius: 5px;
+}
+
+.id-input {
+  width: 58px;
+  height: 32px;
+  padding: 0 6px;
+  color: #e2e8f0;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  background: #1d1d1d;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  cursor: ew-resize;
+  touch-action: none;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.id-input:focus {
+  border-color: var(--accent-color);
+  cursor: text;
+}
+
+.id-input::-webkit-inner-spin-button,
+.id-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .icon-button:hover {
@@ -204,6 +221,12 @@ button:active {
 
 .apply-btn:active {
   background: #1d4ed8;
+}
+
+.apply-btn:disabled {
+  background: #2a2a2a;
+  color: #777777;
+  cursor: not-allowed;
 }
 
 .track-picker {
@@ -561,4 +584,26 @@ input[type="range"]::-webkit-slider-thumb:hover {
 
 .modal-footer button.primary:hover {
   background: var(--accent-hover);
+}
+
+.status-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 54px;
+  z-index: 300;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 8px 12px;
+  color: #e2e8f0;
+  font-size: 11px;
+  background: #242424;
+  border: 1px solid #3d3d3d;
+  border-radius: 4px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  transform: translateX(-50%);
+  animation: fadeIn 0.12s ease-out;
+}
+
+.status-toast.error {
+  color: #fed7d7;
+  border-color: #9b2c2c;
 }

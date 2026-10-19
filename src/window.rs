@@ -94,7 +94,7 @@ impl HlEzingWindow {
             .with_url(crate::ipc::FRONTEND_URL)
             .with_custom_protocol("hl-ezing".into(), crate::ipc::serve_asset)
             .with_ipc_handler(crate::ipc::handle_ipc)
-            .with_devtools(true)
+            .with_devtools(cfg!(debug_assertions))
             .with_bounds(Rect {
                 position: wry::dpi::Position::Physical(wry::dpi::PhysicalPosition::new(0, 0)),
                 size: wry::dpi::Size::Physical(wry::dpi::PhysicalSize::new(300, 200)),

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback, useLayoutEffect } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 import {
   MdCenterFocusWeak,
@@ -16,6 +16,145 @@ const DEFAULT_ELASTIC = { amplitude: 0.5, frequency: 2, decay: 5, reversed: fals
 const DEFAULT_BOUNCE = { cor: 0.5, period: 0.5, reversed: false };
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+const CURVE_DATA_KEY = {
+  bezier: "bezierData",
+  elastic: "elasticData",
+  bounce: "bounceData",
+};
+
+function curveDataFromState(state) {
+  return state.mode === "bezier"
+    ? state.bezierData
+    : state.mode === "elastic"
+      ? state.elasticData
+      : state.bounceData;
+}
+
+function isValidCurveData(mode, data) {
+  if (!data || typeof data !== "object") return false;
+  if (mode === "bezier") {
+    return (
+      Array.isArray(data.points) &&
+      data.points.length >= 2 &&
+      data.points.every(
+        (point) =>
+          Array.isArray(point.anchor) &&
+          Array.isArray(point.inHandle) &&
+          Array.isArray(point.outHandle)
+      )
+    );
+  }
+  if (mode === "elastic") {
+    return ["amplitude", "frequency", "decay"].every((key) =>
+      Number.isFinite(Number(data[key]))
+    );
+  }
+  if (mode === "bounce") {
+    return ["cor", "period"].every((key) => Number.isFinite(Number(data[key])));
+  }
+  return false;
+}
+
+function stateWithCurve(state, curve) {
+  const key = CURVE_DATA_KEY[curve.mode] || CURVE_DATA_KEY.bezier;
+  return {
+    ...state,
+    mode: CURVE_DATA_KEY[curve.mode] ? curve.mode : "bezier",
+    [key]: clone(curve.data),
+  };
+}
+
+function readJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    const value = JSON.parse(raw);
+    return value == null ? fallback : value;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // localStorage が使えない環境でも動作を継続する。
+  }
+}
+
+function sanitizeSettings(value) {
+  const theme = value && typeof value.theme === "object" ? value.theme : {};
+  return {
+    presetPanelLocation: ["right", "left", "top", "bottom"].includes(
+      value?.presetPanelLocation
+    )
+      ? value.presetPanelLocation
+      : "right",
+    presetPanelSize: clamp(Number(value?.presetPanelSize) || 200, 60, 2000),
+    presetBoxSize: clamp(Number(value?.presetBoxSize) || 78, 40, 140),
+    compactMode: true,
+    gridLinesX: clamp(Number(value?.gridLinesX) || 4, 1, 50),
+    gridLinesY: clamp(Number(value?.gridLinesY) || 4, 1, 50),
+    precision: clamp(Number(value?.precision) || 150, 50, 500),
+    theme: {
+      bgColor: theme.bgColor || "#1d1d1d",
+      gridColor: theme.gridColor || "#282828",
+      mainGridColor: theme.mainGridColor || "#3d3d3d",
+      curveColor: "#3b82f6",
+      handleColor: theme.handleColor || "#888888",
+      anchorColor: theme.anchorColor || "#ffffff",
+    },
+  };
+}
+
+// プリセット・IDパネル用のサムネイル。0.8倍で描画する。
+function makeThumb(mode, data, theme) {
+  const c = document.createElement("canvas");
+  c.width = 90;
+  c.height = 90;
+  const x = c.getContext("2d");
+  if (!x) return "";
+  x.fillStyle = theme.bgColor;
+  x.fillRect(0, 0, 90, 90);
+  x.strokeStyle = theme.curveColor;
+  x.lineWidth = 2;
+  x.beginPath();
+
+  const margin = 0.1;
+  const scale = 0.8;
+
+  for (let i = 0; i <= 40; i++) {
+    const t = i / 40;
+    let y;
+    try {
+      y =
+        mode === "bezier"
+          ? evalBezier(data, t)
+          : mode === "elastic"
+            ? elastic(
+              t,
+              data.amplitude,
+              data.frequency,
+              data.decay,
+              data.reversed
+            )
+            : bounce(t, data.cor, data.period, data.reversed);
+    } catch {
+      y = t;
+    }
+    if (!Number.isFinite(y)) y = t;
+    const px = (margin + t * scale) * 90;
+    const py = 90 - (margin + y * scale) * 90;
+    if (!i) x.moveTo(px, py);
+    else x.lineTo(px, py);
+  }
+  x.stroke();
+  return c.toDataURL();
+}
+
+
 
 function defaultBezier() {
   return {
@@ -42,7 +181,9 @@ function elastic(p, a, f, d, reversed) {
   if (p <= 0) return 0;
   if (p >= 1) return 1;
   if (reversed) p = 1 - p;
-  f = Math.max(0.001, f);
+  a = clamp(Number.isFinite(a) ? a : 0.5, 0, 1);
+  f = clamp(Number.isFinite(f) ? f : 2, 0.001, 1000);
+  d = clamp(Number.isFinite(d) ? d : 5, 0, 100);
   let et = (0.5 - Math.sqrt(Math.max(0, d / f)) * 0.05) / f;
   const d1 = (x) => {
     const w = 2 * Math.PI * f;
@@ -87,8 +228,8 @@ function elastic(p, a, f, d, reversed) {
 function bounce(p, cor, period, reversed) {
   if (p <= 0) return 0;
   if (p >= 1) return 1;
-  const c = clamp(cor, 0, 0.999999);
-  const d = Math.max(period, 0.0001);
+  const c = clamp(Number.isFinite(cor) ? cor : 0.5, 0.000001, 0.999999);
+  const d = clamp(Number.isFinite(period) ? period : 0.5, 0.0001, 100);
   if (reversed) p = 1 - p;
   const limit = d * (1 / (1 - c) - 0.5);
   const f1 = (x) => Math.floor(Math.log((c - 1) * x + 1) / Math.log(c));
@@ -221,6 +362,97 @@ function ClampedMenu({ x, y, className, children, onMouseDown, onClick }) {
     >
       {children}
     </div>
+  );
+}
+
+function IdInput({ value, onCommit }) {
+  const [text, setText] = useState(value == null ? "" : String(value));
+  const textRef = useRef(text);
+  const drag = useRef(null);
+  const lastCommitted = useRef(value);
+
+  const updateText = useCallback((next) => {
+    textRef.current = next;
+    setText(next);
+  }, []);
+
+  useEffect(() => {
+    const next = value == null ? "" : String(value);
+    textRef.current = next;
+    setText(next);
+    lastCommitted.current = value;
+  }, [value]);
+
+  const commit = useCallback(
+    (next) => {
+      const parsed = clamp(Math.round(Number(next) || 1), 1, 999999);
+      updateText(String(parsed));
+      if (parsed !== lastCommitted.current) {
+        lastCommitted.current = parsed;
+        onCommit(parsed);
+      }
+    },
+    [onCommit, updateText]
+  );
+
+  // 入力中は少し待ってからIDを切り替える。ドラッグ中は即時反映。
+  useEffect(() => {
+    if (text === "") return;
+    const timer = setTimeout(() => {
+      if (!drag.current) commit(text);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [text, commit]);
+
+  return (
+    <input
+      className="id-input"
+      type="number"
+      min="1"
+      max="999999"
+      step="1"
+      value={text}
+      title="カーブID（数値入力または左右ドラッグで変更）"
+      onChange={(e) => updateText(e.target.value)}
+      onBlur={() => commit(textRef.current)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          commit(textRef.current);
+          e.currentTarget.blur();
+        }
+      }}
+      onPointerDown={(e) => {
+        drag.current = {
+          x: e.clientX,
+          value: Number(text) || value || 1,
+        };
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        if (!drag.current) return;
+        const delta = e.clientX - drag.current.x;
+        if (Math.abs(delta) < 4) return;
+        e.preventDefault();
+        updateText(
+          String(
+            clamp(
+              drag.current.value + Math.round(delta / 4),
+              1,
+              999999
+            )
+          )
+        );
+      }}
+      onPointerUp={() => {
+        if (!drag.current) return;
+        drag.current = null;
+        commit(textRef.current);
+      }}
+      onPointerCancel={() => {
+        drag.current = null;
+        updateText(value == null ? "" : String(value));
+      }}
+    />
   );
 }
 
@@ -466,14 +698,17 @@ function Graph({ state, setState, settings }) {
     }
   }, [state, settings, tr]);
 
+  const drawRef = useRef(null);
+  drawRef.current = draw;
+
   const resize = useCallback(() => {
     const c = ref.current;
     if (!c) return;
     const r = c.parentElement.getBoundingClientRect();
     c.width = Math.max(1, Math.floor(r.width));
     c.height = Math.max(1, Math.floor(r.height));
-    draw();
-  }, [draw]);
+    drawRef.current?.();
+  }, []);
 
   useEffect(() => {
     resize();
@@ -970,52 +1205,25 @@ function Graph({ state, setState, settings }) {
   );
 }
 
-function Presets({ presets, setPresets, setState, settings, style }) {
+function Presets({ presets, setPresets, settings, style, onLoadPreset }) {
   const [dragged, setDragged] = useState(null);
   const [presetMenu, setPresetMenu] = useState(null);
 
-  // プリセットサムネイルグラフの大きさを 0.8倍に縮小描画
-  const makeThumb = (preset) => {
-    const c = document.createElement("canvas");
-    c.width = 90;
-    c.height = 90;
-    const x = c.getContext("2d");
-    x.fillStyle = settings.theme.bgColor;
-    x.fillRect(0, 0, 90, 90);
-    x.strokeStyle = settings.theme.curveColor;
-    x.lineWidth = 2;
-    x.beginPath();
-
-    const margin = 0.1;
-    const scale = 0.8;
-
-    for (let i = 0; i <= 40; i++) {
-      const t = i / 40;
-      const y =
-        preset.mode === "bezier"
-          ? evalBezier(preset.data, t)
-          : preset.mode === "elastic"
-            ? elastic(
-              t,
-              preset.data.amplitude,
-              preset.data.frequency,
-              preset.data.decay,
-              preset.data.reversed
-            )
-            : bounce(
-              t,
-              preset.data.cor,
-              preset.data.period,
-              preset.data.reversed
-            );
-      const px = (margin + t * scale) * 90;
-      const py = 90 - (margin + y * scale) * 90;
-      if (!i) x.moveTo(px, py);
-      else x.lineTo(px, py);
+  const presetThumbs = useMemo(() => {
+    const thumbs = {};
+    for (const preset of presets) {
+      try {
+        thumbs[preset.id] = makeThumb(
+          preset.mode,
+          preset.data,
+          settings.theme
+        );
+      } catch {
+        thumbs[preset.id] = "";
+      }
     }
-    x.stroke();
-    return c.toDataURL();
-  };
+    return thumbs;
+  }, [presets, settings.theme]);
 
   const handlePresetContextMenu = (e, id) => {
     e.preventDefault();
@@ -1055,20 +1263,10 @@ function Presets({ presets, setPresets, setState, settings, style }) {
               setDragged(null);
             }}
             onContextMenu={(e) => handlePresetContextMenu(e, p.id)}
-            onClick={() =>
-              setState((s) => ({
-                ...s,
-                mode: p.mode,
-                ...(p.mode === "bezier"
-                  ? { bezierData: clone(p.data) }
-                  : p.mode === "elastic"
-                    ? { elasticData: clone(p.data) }
-                    : { bounceData: clone(p.data) }),
-              }))
-            }
+            onClick={() => onLoadPreset(p.mode, p.data)}
           >
             <img
-              src={p.thumbnail || makeThumb(p)}
+              src={presetThumbs[p.id] || p.thumbnail || ""}
               alt={p.name}
               style={{ height: `${boxSize - 4}px` }}
             />
@@ -1198,10 +1396,10 @@ function SettingsPanelModal({ open, onClose, settings, setSettings }) {
             value={settings.presetPanelLocation}
             onChange={(e) => update("presetPanelLocation", e.target.value)}
           >
-            <option value="right">Right (右)</option>
-            <option value="left">Left (左)</option>
-            <option value="top">Top (上)</option>
-            <option value="bottom">Bottom (下)</option>
+            <option value="right">右</option>
+            <option value="left">左</option>
+            <option value="top">上</option>
+            <option value="bottom">下</option>
           </select>
         </label>
         <label>
@@ -1221,7 +1419,9 @@ function SettingsPanelModal({ open, onClose, settings, setSettings }) {
             min="1"
             max="50"
             value={settings.gridLinesX}
-            onChange={(e) => update("gridLinesX", Number(e.target.value))}
+            onChange={(e) =>
+              update("gridLinesX", clamp(Number(e.target.value) || 4, 1, 50))
+            }
           />
         </label>
         <label>
@@ -1231,7 +1431,9 @@ function SettingsPanelModal({ open, onClose, settings, setSettings }) {
             min="1"
             max="50"
             value={settings.gridLinesY}
-            onChange={(e) => update("gridLinesY", Number(e.target.value))}
+            onChange={(e) =>
+              update("gridLinesY", clamp(Number(e.target.value) || 4, 1, 50))
+            }
           />
         </label>
         <label>
@@ -1261,46 +1463,298 @@ function App() {
     elasticData: clone(DEFAULT_ELASTIC),
     bounceData: clone(DEFAULT_BOUNCE),
   });
-  const [settings, setSettings] = useState(() => {
-    const defaults = {
-      presetPanelLocation: "right",
-      presetPanelSize: 200,
-      presetBoxSize: 78,
-      compactMode: true,
-      gridLinesX: 4,
-      gridLinesY: 4,
-      precision: 150,
-      theme: {
-        bgColor: "#1d1d1d",
-        gridColor: "#282828",
-        mainGridColor: "#3d3d3d",
-        curveColor: "#3b82f6",
-        handleColor: "#888888",
-        anchorColor: "#ffffff",
-      },
-    };
-    const saved = JSON.parse(localStorage.getItem("hl_ezing.react.settings") || "{}");
-    const merged = Object.assign({}, defaults, saved);
-    merged.theme = Object.assign({}, defaults.theme, saved.theme, { curveColor: "#3b82f6" });
-    return merged;
-  });
-
-  const [presets, setPresets] = useState(() =>
-    JSON.parse(localStorage.getItem("hl_ezing.react.presets") || "[]")
+  const [settings, setSettings] = useState(() =>
+    sanitizeSettings(readJson("hl_ezing.react.settings", {}))
   );
+  const [curves, setCurves] = useState([]);
+  const [activeId, setActiveId] = useState(null);
+  const [notice, setNotice] = useState(null);
+
+  const [presets, setPresets] = useState(() => {
+    const value = readJson("hl_ezing.react.presets", []);
+    return Array.isArray(value)
+      ? value.filter(
+          (preset) =>
+            preset &&
+            preset.id &&
+            preset.mode &&
+            isValidCurveData(preset.mode, preset.data)
+        )
+      : [];
+  });
   const [showSavePreset, setShowSavePreset] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [panelSize, setPanelSize] = useState(settings.presetPanelSize || 200);
   const resizing = useRef(false);
   const applyWrapRef = useRef(null);
   const [pickerMaxHeight, setPickerMaxHeight] = useState(200);
+  const [trackPicker, setTrackPicker] = useState(null);
+
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const curvesRef = useRef(curves);
+  curvesRef.current = curves;
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+
+  const noticeTimer = useRef(null);
+  const bootstrappedRef = useRef(false);
+  const lastSentRef = useRef(null);
+  const tracksRequestRef = useRef(null);
+
+  const post = useCallback((message) => {
+    window.ipc?.postMessage(JSON.stringify(message));
+  }, []);
+
+  const notify = useCallback((text, kind = "info") => {
+    setNotice({ text, kind });
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setNotice(null), 3200);
+  }, []);
 
   useEffect(() => {
-    localStorage.setItem("hl_ezing.react.settings", JSON.stringify(settings));
+    writeJson("hl_ezing.react.settings", settings);
   }, [settings]);
   useEffect(() => {
-    localStorage.setItem("hl_ezing.react.presets", JSON.stringify(presets));
+    writeJson("hl_ezing.react.presets", presets);
   }, [presets]);
+
+  const selectCurve = useCallback((id) => {
+    if (id === activeIdRef.current) return;
+    const curve = curvesRef.current.find((entry) => entry.id === id);
+    if (!curve) return;
+
+    // 編集中のIDは一覧側のデータを遅延更新しているため、切り替え前に同期する。
+    if (activeIdRef.current != null) {
+      const current = stateRef.current;
+      setCurves((list) =>
+        list.map((entry) =>
+          entry.id === activeIdRef.current
+            ? {
+                ...entry,
+                mode: current.mode,
+                data: clone(curveDataFromState(current)),
+              }
+            : entry
+        )
+      );
+    }
+
+    setActiveId(id);
+    setState((current) => stateWithCurve(current, curve));
+    lastSentRef.current = null;
+  }, []);
+
+  const selectOrCreateId = useCallback(
+    (id) => {
+      if (id === activeIdRef.current) return;
+      const existing = curvesRef.current.find((curve) => curve.id === id);
+      if (existing) {
+        selectCurve(id);
+        return;
+      }
+      // 入力されたIDが未作成の場合は、現在のグラフを複製して作成する。
+      const current = stateRef.current;
+      post({
+        cmd: "create_curve",
+        id,
+        mode: current.mode,
+        data: clone(curveDataFromState(current)),
+      });
+    },
+    [post, selectCurve]
+  );
+
+  const loadPreset = useCallback(
+    (mode, data) => {
+      if (!isValidCurveData(mode, data)) {
+        notify("プリセットのデータが不正です。", "error");
+        return;
+      }
+      if (activeIdRef.current == null) {
+        notify("先にカーブIDを入力してください。", "error");
+        return;
+      }
+      const key = CURVE_DATA_KEY[mode] || CURVE_DATA_KEY.bezier;
+      setState((current) => ({
+        ...current,
+        mode: key === CURVE_DATA_KEY.bezier ? "bezier" : mode,
+        [key]: clone(data),
+      }));
+    },
+    [notify]
+  );
+
+  const handleEvent = useCallback(
+    (event) => {
+      if (!event || !event.event) return;
+
+      if (event.event === "curves") {
+        const list = Array.isArray(event.curves) ? event.curves : [];
+        setCurves(list);
+        if (list.length === 0) {
+          setActiveId(null);
+          if (!bootstrappedRef.current) {
+            bootstrappedRef.current = true;
+            post({ cmd: "create_curve", mode: "bezier", data: defaultBezier() });
+          }
+          return;
+        }
+        bootstrappedRef.current = true;
+        const preferred =
+          event.last_applied ?? activeIdRef.current ?? list[0].id;
+        const next =
+          list.find((curve) => curve.id === preferred) || list[0];
+        setActiveId(next.id);
+        setState((current) => stateWithCurve(current, next));
+        lastSentRef.current = null;
+        return;
+      }
+
+      if (event.event === "curve_created") {
+        if (!event.ok || !event.curve) {
+          notify(event.message || "カーブIDの作成に失敗しました。", "error");
+          return;
+        }
+        const curve = event.curve;
+        const previousId = activeIdRef.current;
+        const previousState = stateRef.current;
+        setCurves((list) =>
+          [
+            ...list.map((entry) =>
+              entry.id === previousId
+                ? {
+                    ...entry,
+                    mode: previousState.mode,
+                    data: clone(curveDataFromState(previousState)),
+                  }
+                : entry
+            ),
+            curve,
+          ]
+            .filter(
+              (entry, index, array) =>
+                array.findIndex((candidate) => candidate.id === entry.id) ===
+                index
+            )
+            .sort((a, b) => a.id - b.id)
+        );
+        setActiveId(curve.id);
+        setState((current) => stateWithCurve(current, curve));
+        lastSentRef.current = null;
+        return;
+      }
+
+      if (event.event === "curve_updated") {
+        // 編集中IDの更新は毎フレーム近く届くため、ID一覧の再描画を避ける。
+        // 切り替え時に selectCurve() 側で最新データを同期する。
+        if (
+          event.ok &&
+          event.curve &&
+          event.curve.id !== activeIdRef.current
+        ) {
+          setCurves((list) =>
+            list.map((entry) =>
+              entry.id === event.curve.id ? event.curve : entry
+            )
+          );
+        }
+        return;
+      }
+
+      if (event.event === "curve_deleted") {
+        if (!event.ok) {
+          notify(event.message || "カーブIDの削除に失敗しました。", "error");
+          return;
+        }
+        const remaining = curvesRef.current.filter(
+          (curve) => curve.id !== event.id
+        );
+        setCurves(remaining);
+        if (activeIdRef.current === event.id) {
+          const next = remaining[0];
+          if (next) {
+            setActiveId(next.id);
+            setState((current) => stateWithCurve(current, next));
+          } else {
+            setActiveId(null);
+          }
+          lastSentRef.current = null;
+        }
+        notify(`ID ${event.id} を削除しました。`);
+        return;
+      }
+
+      if (event.event === "applied") {
+        if (!event.ok) {
+          notify(event.message || "適用に失敗しました。", "error");
+          return;
+        }
+        const curve =
+          event.curve || {
+            id: event.id,
+            mode: stateRef.current.mode,
+            data: clone(curveDataFromState(stateRef.current)),
+          };
+        setCurves((list) =>
+          [...list.filter((entry) => entry.id !== curve.id), curve].sort(
+            (a, b) => a.id - b.id
+          )
+        );
+        if (event.created) setActiveId(curve.id);
+        notify(`ID ${event.id} を${event.count}件のトラックバーに適用しました。`);
+        return;
+      }
+
+      if (event.event === "tracks") {
+        window.dispatchEvent(
+          new CustomEvent("hl-ezing-tracks", { detail: event })
+        );
+        return;
+      }
+
+      if (event.event === "projectLoaded") {
+        bootstrappedRef.current = false;
+        lastSentRef.current = null;
+        setCurves([]);
+        setActiveId(null);
+        post({ cmd: "get_curves" });
+      }
+    },
+    [notify, post]
+  );
+
+  useEffect(() => {
+    window.hlEzing = { onEvent: handleEvent, post };
+    post({ cmd: "hello" });
+    post({ cmd: "get_curves" });
+  }, [handleEvent, post]);
+
+  // エディタの変更をアクティブIDへ反映する。少し遅延させることで
+  // ドラッグ中の連続IPCを抑えつつ、トラック側は即座に追従する。
+  useEffect(() => {
+    if (activeId == null) return;
+    const data = curveDataFromState(state);
+    const payload = JSON.stringify({ mode: state.mode, data });
+    if (lastSentRef.current === payload) return;
+    const timer = setTimeout(() => {
+      lastSentRef.current = payload;
+      post({
+        cmd: "update_curve",
+        id: activeId,
+        mode: state.mode,
+        data: clone(data),
+      });
+    }, 80);
+    return () => clearTimeout(timer);
+  }, [
+    activeId,
+    state.mode,
+    state.bezierData,
+    state.elasticData,
+    state.bounceData,
+    post,
+  ]);
 
   const handleResizeMove = useCallback(
     (e) => {
@@ -1330,7 +1784,10 @@ function App() {
     const up = () => {
       if (resizing.current) {
         resizing.current = false;
-        setSettings((s) => ({ ...s, presetPanelSize: panelSize }));
+        setSettings((current) => ({
+          ...current,
+          presetPanelSize: panelSize,
+        }));
       }
     };
     window.addEventListener("mousemove", move);
@@ -1341,8 +1798,6 @@ function App() {
     };
   }, [handleResizeMove, panelSize]);
 
-  const [trackPicker, setTrackPicker] = useState(null); // { tracks: [...] }
-
   // トラックピッカーの高さをウィンドウ領域内に収める
   useEffect(() => {
     if (!trackPicker) return;
@@ -1350,7 +1805,7 @@ function App() {
       const el = applyWrapRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
-      const available = rect.bottom - 38 - 6; // ピッカー下端はボタン上38px、上端余白6px
+      const available = rect.bottom - 38 - 6;
       setPickerMaxHeight(Math.max(40, Math.min(200, available)));
     };
     measure();
@@ -1368,113 +1823,145 @@ function App() {
     return () => window.removeEventListener("mousedown", close);
   }, [trackPicker]);
 
-  useEffect(() => {
-    window.hlEzing = {
-      onEvent: (event) => {
-        if (event.event === "applied")
-          window.dispatchEvent(new CustomEvent("hl-ezing-applied", { detail: event }));
-        if (event.event === "tracks") {
-          window.dispatchEvent(new CustomEvent("hl-ezing-tracks", { detail: event }));
-        }
-      },
-      post: (message) => window.ipc?.postMessage(JSON.stringify(message)),
-    };
-    window.hlEzing.post({ cmd: "hello" });
+  const setMode = (mode) => setState((current) => ({ ...current, mode }));
+
+  const clearTracksRequest = useCallback(() => {
+    if (!tracksRequestRef.current) return;
+    window.removeEventListener(
+      "hl-ezing-tracks",
+      tracksRequestRef.current.listener
+    );
+    clearTimeout(tracksRequestRef.current.timer);
+    tracksRequestRef.current = null;
   }, []);
 
-  const setMode = (mode) => setState((s) => ({ ...s, mode }));
-
-  const handleApplyClick = () => {
-    // トラック一覧を取得してドロップダウンを表示
-    const onTracks = (e) => {
-      window.removeEventListener("hl-ezing-tracks", onTracks);
-      const tracks = e.detail?.tracks || [];
-      if (tracks.length === 0) {
-        // トラックが無い場合はそのまま適用
-        doApply(null);
-      } else if (tracks.length === 1) {
-        // 1つしかない場合はそのまま適用
-        doApply(tracks[0].item, tracks[0].effect, tracks[0].effect_index);
-      } else {
-        // 複数ある場合はピッカーを表示
-        setTrackPicker({ tracks });
-      }
-    };
-    window.addEventListener("hl-ezing-tracks", onTracks);
-    window.ipc?.postMessage(JSON.stringify({ cmd: "get_tracks" }));
-  };
-
   const doApply = (itemName, effectName, effectIndex) => {
-    const data =
-      state.mode === "bezier"
-        ? state.bezierData
-        : state.mode === "elastic"
-          ? state.elasticData
-          : state.bounceData;
-    const msg = { cmd: "apply", mode: state.mode, data: clone(data) };
+    if (activeIdRef.current == null) {
+      notify("先にカーブIDを作成してください。", "error");
+      return;
+    }
+    const current = stateRef.current;
+    const msg = {
+      cmd: "apply",
+      curve_id: activeIdRef.current,
+      mode: current.mode,
+      data: clone(curveDataFromState(current)),
+    };
     if (itemName) msg.item_name = itemName;
     if (effectName) msg.effect_name = effectName;
     if (effectIndex != null) msg.effect_index = effectIndex;
-    window.ipc?.postMessage(JSON.stringify(msg));
-    setTrackPicker(null);
+    post(msg);
+  };
+
+  const handleApplyClick = () => {
+    if (activeIdRef.current == null) {
+      notify("先にカーブIDを作成してください。", "error");
+      return;
+    }
+    clearTracksRequest();
+
+    const onTracks = (e) => {
+      clearTracksRequest();
+      const detail = e.detail || {};
+      if (!detail.ok) {
+        notify(detail.message || "トラック一覧の取得に失敗しました。", "error");
+        return;
+      }
+      const tracks = detail.tracks || [];
+      if (tracks.length === 0) {
+        notify("適用可能なトラックバーがありません。", "error");
+        return;
+      }
+      if (tracks.length === 1) {
+        doApply(tracks[0].item, tracks[0].effect, tracks[0].effect_index);
+        setTrackPicker(null);
+        return;
+      }
+      setTrackPicker({ tracks });
+    };
+
+    const timer = setTimeout(() => {
+      clearTracksRequest();
+      notify("トラック一覧の取得がタイムアウトしました。", "error");
+    }, 3000);
+    tracksRequestRef.current = { listener: onTracks, timer };
+    window.addEventListener("hl-ezing-tracks", onTracks);
+    post({ cmd: "get_tracks" });
   };
 
   const handleSavePresetConfirm = (name) => {
-    const data =
-      state.mode === "bezier"
-        ? state.bezierData
-        : state.mode === "elastic"
-          ? state.elasticData
-          : state.bounceData;
-    setPresets((p) => [
-      ...p,
+    const current = stateRef.current;
+    setPresets((list) => [
+      ...list,
       {
         id: `${Date.now()}`,
         name,
-        mode: state.mode,
-        data: clone(data),
+        mode: current.mode,
+        data: clone(curveDataFromState(current)),
         thumbnail: null,
       },
     ]);
   };
 
   const reset = () =>
-    setState((s) => ({
-      ...s,
+    setState((current) => ({
+      ...current,
       bezierData: defaultBezier(),
       elasticData: clone(DEFAULT_ELASTIC),
       bounceData: clone(DEFAULT_BOUNCE),
     }));
 
   const reverse = () => {
-    if (state.mode === "elastic")
-      setState((s) => ({
-        ...s,
+    if (state.mode === "elastic") {
+      setState((current) => ({
+        ...current,
         elasticData: {
-          ...s.elasticData,
-          reversed: !s.elasticData.reversed,
+          ...current.elasticData,
+          reversed: !current.elasticData.reversed,
         },
       }));
-    else if (state.mode === "bounce")
-      setState((s) => ({
-        ...s,
-        bounceData: {
-          ...s.bounceData,
-          reversed: !s.bounceData.reversed,
-        },
-      }));
-    else {
-      const points = clone(state.bezierData.points)
-        .reverse()
-        .map((p) => ({
-          ...p,
-          anchor: [1 - p.anchor[0], 1 - p.anchor[1]],
-          inHandle: [1 - p.outHandle[0], 1 - p.outHandle[1]],
-          outHandle: [1 - p.inHandle[0], 1 - p.inHandle[1]],
-        }));
-      clampHandles(points);
-      setState((s) => ({ ...s, bezierData: { points } }));
+      return;
     }
+    if (state.mode === "bounce") {
+      setState((current) => ({
+        ...current,
+        bounceData: {
+          ...current.bounceData,
+          reversed: !current.bounceData.reversed,
+        },
+      }));
+      return;
+    }
+
+    const original = clone(state.bezierData.points);
+    const points = original
+      .slice()
+      .reverse()
+      .map((point, index) => {
+        const originalIndex = original.length - 1 - index;
+        const incoming =
+          originalIndex > 0 ? original[originalIndex - 1] : null;
+        const outType = incoming?.outType || "bezier";
+        const elastic = incoming?.outElasticParams
+          ? clone(incoming.outElasticParams)
+          : undefined;
+        const bounce = incoming?.outBounceParams
+          ? clone(incoming.outBounceParams)
+          : undefined;
+        if (elastic) elastic.reversed = !elastic.reversed;
+        if (bounce) bounce.reversed = !bounce.reversed;
+        return {
+          ...point,
+          anchor: [1 - point.anchor[0], 1 - point.anchor[1]],
+          inHandle: [1 - point.outHandle[0], 1 - point.outHandle[1]],
+          outHandle: [1 - point.inHandle[0], 1 - point.inHandle[1]],
+          outType,
+          outElasticParams: elastic,
+          outBounceParams: bounce,
+        };
+      });
+    clampHandles(points);
+    setState((current) => ({ ...current, bezierData: { points } }));
   };
 
   const loc = settings.presetPanelLocation || "right";
@@ -1489,9 +1976,9 @@ function App() {
     <Presets
       presets={presets}
       setPresets={setPresets}
-      setState={setState}
       settings={settings}
       style={presetStyle}
+      onLoadPreset={loadPreset}
     />
   );
 
@@ -1510,21 +1997,17 @@ function App() {
       )}
       <main className="main">
         <header className="floating-header">
-          <div className="modes">
-            {[
-              ["bezier", "ベジェ"],
-              ["elastic", "振動"],
-              ["bounce", "バウンス"],
-            ].map(([mode, label]) => (
-              <button
-                className={state.mode === mode ? "active" : ""}
-                onClick={() => setMode(mode)}
-                key={mode}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          <select
+            className="mode-select"
+            value={state.mode}
+            onChange={(e) => setMode(e.target.value)}
+            title="イージングの種類"
+          >
+            <option value="bezier">ベジェ</option>
+            <option value="elastic">振動</option>
+            <option value="bounce">バウンス</option>
+          </select>
+          <IdInput value={activeId} onCommit={selectOrCreateId} />
           <button
             className="icon-button"
             title="設定"
@@ -1539,7 +2022,12 @@ function App() {
             <button
               className="apply-btn"
               onClick={handleApplyClick}
-              title="適用先プロパティを選択"
+              disabled={activeId == null}
+              title={
+                activeId == null
+                  ? "カーブIDを作成してください"
+                  : "適用先プロパティを選択"
+              }
             >
               <MdPlayArrow /> 適用
             </button>
@@ -1561,6 +2049,7 @@ function App() {
                     }}
                   >
                     {t.label}
+                    {t.curve_id != null ? ` [ID ${t.curve_id}]` : ""}
                   </button>
                 ))}
                 <div className="context-menu-divider" />
@@ -1602,6 +2091,9 @@ function App() {
         />
       )}
       {!isBefore && presetsComponent}
+      {notice && (
+        <div className={`status-toast ${notice.kind}`}>{notice.text}</div>
+      )}
       <SavePresetModal
         open={showSavePreset}
         onClose={() => setShowSavePreset(false)}
@@ -1617,5 +2109,6 @@ function App() {
     </div>
   );
 }
+
 
 createRoot(document.getElementById("root")).render(<App />);

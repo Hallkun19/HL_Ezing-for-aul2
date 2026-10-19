@@ -68,8 +68,13 @@ impl aviutl2::generic::GenericPlugin for HlEzingPlugin {
     }
 
     fn on_project_load(&mut self, project: &mut aviutl2::generic::ProjectFile) {
+        curve::registry::clear_last_applied();
         match project.deserialize::<Vec<(u64, Curve)>>(curve::apply::PROJECT_KEY) {
             Ok(entries) => {
+                let entries = entries
+                    .into_iter()
+                    .map(|(id, curve)| (id, curve.sanitized()))
+                    .collect();
                 curve::registry::load(entries);
                 tracing::info!(
                     "Loaded {} curves from project.",
@@ -81,6 +86,14 @@ impl aviutl2::generic::GenericPlugin for HlEzingPlugin {
                 tracing::info!("No curves in project ({e}).");
             }
         }
+
+        // 旧バージョンでは保存していないため、無い場合は「最後のカーブなし」。
+        if let Ok(id) = project.deserialize::<u64>(curve::apply::LAST_APPLIED_KEY)
+            && curve::registry::contains(id)
+        {
+            curve::registry::set_last_applied(id);
+        }
+
         window::evaluate(
             "window.hlEzing && window.hlEzing.onEvent({event:'projectLoaded'})".into(),
         );
@@ -90,6 +103,10 @@ impl aviutl2::generic::GenericPlugin for HlEzingPlugin {
         let entries = curve::registry::snapshot();
         if let Err(e) = project.serialize(curve::apply::PROJECT_KEY, &entries) {
             tracing::warn!("Failed to save curves to project: {e}");
+        }
+        let last_applied = curve::registry::last_applied().unwrap_or(u64::MAX);
+        if let Err(e) = project.serialize(curve::apply::LAST_APPLIED_KEY, &last_applied) {
+            tracing::warn!("Failed to save last applied curve: {e}");
         }
     }
 

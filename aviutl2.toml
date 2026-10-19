@@ -1,7 +1,7 @@
 [project]
 id = "halkun19.HL_Ezing"
 name = "HL_Ezing"
-version = "1.0.1"
+version = "1.1.0"
 
 [development]
 aviutl2_version = "latest"
@@ -20,6 +20,10 @@ source = "target/release/hl_ezing.dll"
 [artifacts.HL_Ezing-tra2]
 source = "script/HL_Ezing.tra2"
 destination = "Script/HL_Ezing/HL_Ezing.tra2"
+
+[artifacts.HL_Ezing-license]
+source = "LICENSE.txt"
+destination = "LICENSE.txt"
 
 [release]
 output_dir = "release"
