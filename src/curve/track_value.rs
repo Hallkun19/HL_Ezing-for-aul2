@@ -49,6 +49,48 @@ pub struct TrackValue {
 }
 
 impl TrackValue {
+    /// 区間ごとのカーブIDリストを返す。
+    ///
+    /// 新形式: `[0, id0, id1, ..., nonce]`
+    /// 旧形式: `[id, nonce]`
+    ///
+    /// 旧形式や未適用のトラックでは、足りない区間を `default_id` または
+    /// 直前のIDで埋める。区間数は呼び出し側が値の点数から決める。
+    pub fn segment_curve_ids(
+        &self,
+        mode_name: &str,
+        segment_count: usize,
+        default_id: u64,
+    ) -> Vec<u64> {
+        let count = segment_count.max(1);
+        let mut ids = Vec::new();
+        if let Some(movement) = &self.movement
+            && movement.name == mode_name
+        {
+            let params = &movement.parameters;
+            if params.first().copied() == Some(0.0) && params.len() >= 3 {
+                ids = params[1..params.len() - 1]
+                    .iter()
+                    .map(|value| *value as u64)
+                    .filter(|id| *id > 0)
+                    .collect();
+            } else if let Some(id) = params.first().map(|value| *value as u64)
+                && id > 0
+            {
+                ids.push(id);
+            }
+        }
+        if ids.is_empty() {
+            ids.push(default_id);
+        }
+        let fill = *ids.last().unwrap_or(&default_id);
+        while ids.len() < count {
+            ids.push(fill);
+        }
+        ids.truncate(count);
+        ids
+    }
+
     /// 値文字列を解析する。
     ///
     /// `info` は `EditSection::get_effect_track_info` の結果。
@@ -280,17 +322,11 @@ mod tests {
     use aviutl2::generic::TrackInfo;
 
     fn info(mode: &str, params: Vec<f64>, timecontrol: bool) -> TrackInfo {
-        TrackInfo {
-            mode: mode.to_string(),
-            params,
-            accelerate: false,
-            decelerate: false,
-            twopoint: false,
-            timecontrol,
-            group_num: 1,
-            group_index: 0,
-            group_name: None,
-        }
+        let mut info = TrackInfo::default();
+        info.mode = Some(mode.to_string());
+        info.params = params;
+        info.timecontrol = timecontrol;
+        info
     }
 
     #[test]
@@ -342,6 +378,37 @@ mod tests {
             TrackValue::parse(text, Some(&info("直線移動(時間制御)", vec![], true))).unwrap();
         assert_eq!(track.time_control.as_deref(), Some("0.25,1,0.191176,1"));
         assert_eq!(track.to_string(), text);
+    }
+
+    #[test]
+    fn segment_ids_from_old_single_curve_format() {
+        let track = TrackValue::parse(
+            "0.00,50.00,100.00,HL_Ezing,0",
+            Some(&info("HL_Ezing", vec![3.0, 17.0], false)),
+        )
+        .unwrap();
+        assert_eq!(track.segment_curve_ids("HL_Ezing", 3, 9), vec![3, 3, 3]);
+    }
+
+    #[test]
+    fn segment_ids_from_new_list_format() {
+        let track = TrackValue::parse(
+            "0.00,50.00,100.00,HL_Ezing,0",
+            Some(&info("HL_Ezing", vec![0.0, 3.0, 4.0, 17.0], false)),
+        )
+        .unwrap();
+        assert_eq!(track.segment_curve_ids("HL_Ezing", 2, 9), vec![3, 4]);
+        assert_eq!(track.segment_curve_ids("HL_Ezing", 4, 9), vec![3, 4, 4, 4]);
+    }
+
+    #[test]
+    fn segment_ids_fall_back_to_default_for_other_movement() {
+        let track = TrackValue::parse(
+            "0.00,100.00,直線移動,0",
+            Some(&info("直線移動", vec![], false)),
+        )
+        .unwrap();
+        assert_eq!(track.segment_curve_ids("HL_Ezing", 2, 7), vec![7, 7]);
     }
 
     #[test]

@@ -9,6 +9,7 @@
 mod curve;
 mod ipc;
 mod module;
+mod trackbar;
 mod window;
 
 use aviutl2::AnyResult;
@@ -24,6 +25,18 @@ impl aviutl2::generic::GenericPlugin for HlEzingPlugin {
     fn new(info: aviutl2::AviUtl2Info) -> AnyResult<Self> {
         Self::init_logging();
         tracing::info!("Initializing HL_Ezing...");
+        trackbar::set_version(info.version.0);
+        if trackbar::is_supported() {
+            tracing::info!(
+                "Trackbar drag/drop is available (AviUtl2 version {}).",
+                info.version.0
+            );
+        } else {
+            tracing::warn!(
+                "Trackbar drag/drop is unavailable for AviUtl2 version {} (profile/RTTI mismatch).",
+                info.version.0
+            );
+        }
         let window = window::HlEzingWindow::create()?;
         let module =
             aviutl2::generic::SubPlugin::<module::HlEzingModule>::new_script_module(&info)?;
@@ -141,6 +154,12 @@ impl HlEzingPlugin {
             .call_edit_section(|edit| curve::apply::apply_to_selection(edit, curve_id))?
             .map_err(aviutl2::anyhow::Error::msg)?;
         tracing::info!("Reapplied curve {} to {} tracks.", curve_id, result);
+        Ok(())
+    }
+
+    #[object(name = "HL_Ezing\\ドラッグ適用の診断情報をログ出力")]
+    fn menu_debug_trackbars(&mut self) -> AnyResult<()> {
+        trackbar::log_debug_snapshot();
         Ok(())
     }
 }

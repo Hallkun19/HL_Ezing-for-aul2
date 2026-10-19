@@ -3,21 +3,40 @@
 --information:HL_Ezing curve evaluator by halkun19
 
 local gp = obj.getpoint
-local curve_id, nonce = gp("param")
-
-if curve_id == nil then
-    return gp("default")
-end
+local params = { gp("param") }
 
 local idx, t = math.modf(gp("index"))
 local num = gp("num")
 if num and num > 1 then
-    -- 最終区間の端で idx + 1 が範囲外にならないようにする。
+    -- 最終区間の端で idx + 1 が範囲外にならないようにする
     if idx < 0 then
         idx, t = 0, 0
     elseif idx >= num - 1 then
         idx, t = num - 2, 1
     end
+end
+
+local curve_id
+local nonce
+if params[1] == 0 and #params >= 3 then
+    -- 区間IDリスト形式: [0, id0, id1, ..., nonce]
+    local id_count = #params - 2
+    local id_index = idx + 1
+    if id_index < 1 then
+        id_index = 1
+    elseif id_index > id_count then
+        id_index = id_count
+    end
+    curve_id = params[1 + id_index]
+    nonce = params[#params] or 0
+else
+    -- 旧形式: [curve_id, nonce]
+    curve_id = params[1]
+    nonce = params[2] or 0
+end
+
+if curve_id == nil then
+    return gp("default")
 end
 
 local st = gp(idx)

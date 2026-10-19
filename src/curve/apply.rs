@@ -32,10 +32,13 @@ pub fn apply_to_single_track(
     target_effect_index: Option<usize>,
     target_item: Option<&str>,
 ) -> Result<usize, String> {
-    let Some(object) = first_object(edit)? else {
+    let Some(object) = focused_or_first_object(edit)? else {
         return Err("対象のオブジェクトが見つかりません。".into());
     };
 
+    // 単一トラックへの適用では、シークバー位置が取れない場合でも
+    // 全區間を上書きせず、先頭区間だけを対象にする。
+    let segment = Some(focus_segment(edit).unwrap_or(0));
     let effects = edit.get_effects(object).map_err(|e| e.to_string())?;
     // 同名エフェクトのインスタンスを区別するための名前別インデックス
     let mut seen = std::collections::HashMap::<String, usize>::new();
@@ -71,7 +74,7 @@ pub fn apply_to_single_track(
                 continue;
             }
             // 最初に対象となった単一のトラックバーだけに適用して終了する
-            if apply_to_track_with_group(edit, object, effect, &item.name, curve_id) {
+            if apply_to_track_with_group(edit, object, effect, &item.name, curve_id, segment) {
                 return Ok(1);
             }
         }
@@ -98,7 +101,7 @@ pub fn apply_to_all_tracks(edit: &EditSection, curve_id: u64) -> Result<usize, S
             if edit.get_effect_track_info(effect, &item.name).is_err() {
                 continue;
             }
-            if apply_to_track(edit, object, effect, &item.name, curve_id) {
+            if apply_to_track(edit, object, effect, &item.name, curve_id, None) {
                 applied += 1;
             }
         }
@@ -125,17 +128,49 @@ pub fn apply_to_item(
     item: &str,
     curve_id: u64,
 ) -> Result<(), String> {
+    apply_to_item_on_object(edit, object, effect_name, effect_index, item, curve_id)
+}
+
+/// オブジェクトを明示して1本のトラックバーへ適用する。
+///
+/// ウィンドウ外からのドラッグ&ドロップでは、選択オブジェクトではなく
+/// オブジェクト設定に表示されているオブジェクトへ適用したいため、
+/// オブジェクトハンドルを呼び出し側から渡せるようにしている。
+pub fn apply_to_item_on_object(
+    edit: &EditSection,
+    object: aviutl2::generic::ObjectHandle,
+    effect_name: &str,
+    effect_index: usize,
+    item: &str,
+    curve_id: u64,
+) -> Result<(), String> {
     let effect = edit
         .find_effect(object, effect_name, effect_index)
         .map_err(|e| e.to_string())?;
     if edit.get_effect_track_info(effect, item).is_err() {
         return Err("対象のトラックバーが見つかりません。".into());
     }
-    if apply_to_track_with_group(edit, object, effect, item, curve_id) {
+    let segment = Some(focus_segment(edit).unwrap_or(0));
+    if apply_to_track_with_group(edit, object, effect, item, curve_id, segment) {
         Ok(())
     } else {
         Err("トラックバーの移動方法を書き換えられませんでした。".into())
     }
+}
+
+fn focus_segment(edit: &EditSection) -> Option<usize> {
+    edit.get_focus_object_section().ok().flatten()
+}
+
+/// オブジェクト設定にフォーカスされているオブジェクトを優先して返す。
+/// フォーカスがない場合だけ選択オブジェクトの先頭へフォールバックする。
+pub fn focused_or_first_object(
+    edit: &EditSection,
+) -> Result<Option<aviutl2::generic::ObjectHandle>, String> {
+    if let Ok(Some(object)) = edit.get_focused_object() {
+        return Ok(Some(object));
+    }
+    first_object(edit)
 }
 
 fn first_object(edit: &EditSection) -> Result<Option<aviutl2::generic::ObjectHandle>, String> {
@@ -148,11 +183,46 @@ fn first_object(edit: &EditSection) -> Result<Option<aviutl2::generic::ObjectHan
     Ok(objects.first().copied())
 }
 
-fn track_info(
+/// ドラッグ&ドロップの照合用に、適用可能なトラックバーを列挙する。
+#[derive(Debug, Clone)]
+pub struct TrackEntry {
+    pub effect: String,
+    pub effect_index: usize,
+    pub item: String,
+}
+
+pub fn collect_tracks(
     edit: &EditSection,
-    effect: EffectHandle,
-    item: &str,
-) -> Result<Option<TrackInfo>, ()> {
+    object: aviutl2::generic::ObjectHandle,
+) -> Result<Vec<TrackEntry>, String> {
+    let effects = edit.get_effects(object).map_err(|e| e.to_string())?;
+    let mut seen = std::collections::HashMap::<String, usize>::new();
+    let mut tracks = Vec::new();
+    for effect in effects {
+        let effect_name = edit.get_effect_name(effect).map_err(|e| e.to_string())?;
+        let effect_index = {
+            let index = *seen.entry(effect_name.clone()).or_insert(0);
+            *seen.entry(effect_name.clone()).or_insert(0) += 1;
+            index
+        };
+        let Ok(items) = crate::ipc::EDIT_HANDLE.get_effect_items(&effect_name) else {
+            continue;
+        };
+        for item in items {
+            if edit.get_effect_track_info(effect, &item.name).is_err() {
+                continue;
+            }
+            tracks.push(TrackEntry {
+                effect: effect_name.clone(),
+                effect_index,
+                item: item.name,
+            });
+        }
+    }
+    Ok(tracks)
+}
+
+fn track_info(edit: &EditSection, effect: EffectHandle, item: &str) -> Result<TrackInfo, ()> {
     edit.get_effect_track_info(effect, item).map_err(|_| ())
 }
 
@@ -163,33 +233,34 @@ fn apply_to_track_with_group(
     effect: EffectHandle,
     item: &str,
     curve_id: u64,
+    segment: Option<usize>,
 ) -> bool {
-    let info = track_info(edit, effect, item).ok().flatten();
+    let info = track_info(edit, effect, item).ok();
     let group_name = info.as_ref().and_then(|info| info.group_name.clone());
     let group_num = info.as_ref().map_or(1, |info| info.group_num);
 
     if group_name.is_some() && group_num > 1 {
         let Ok(effect_name) = edit.get_effect_name(effect) else {
-            return apply_to_track(edit, object, effect, item, curve_id);
+            return apply_to_track(edit, object, effect, item, curve_id, segment);
         };
         let Ok(items) = crate::ipc::EDIT_HANDLE.get_effect_items(&effect_name) else {
-            return apply_to_track(edit, object, effect, item, curve_id);
+            return apply_to_track(edit, object, effect, item, curve_id, segment);
         };
         let mut applied = false;
         for candidate in items {
-            let candidate_info = track_info(edit, effect, &candidate.name).ok().flatten();
+            let candidate_info = track_info(edit, effect, &candidate.name).ok();
             if candidate_info
                 .as_ref()
                 .and_then(|info| info.group_name.as_ref())
                 == group_name.as_ref()
             {
-                applied |= apply_to_track(edit, object, effect, &candidate.name, curve_id);
+                applied |= apply_to_track(edit, object, effect, &candidate.name, curve_id, segment);
             }
         }
         return applied;
     }
 
-    apply_to_track(edit, object, effect, item, curve_id)
+    apply_to_track(edit, object, effect, item, curve_id, segment)
 }
 
 fn apply_to_track(
@@ -198,6 +269,7 @@ fn apply_to_track(
     effect: EffectHandle,
     item: &str,
     curve_id: u64,
+    segment: Option<usize>,
 ) -> bool {
     let Ok(layer_frame) = edit.get_object_layer_frame(object) else {
         return false;
@@ -205,7 +277,7 @@ fn apply_to_track(
     let start_f = layer_frame.start as f64;
     let end_f = layer_frame.end as f64;
 
-    let info = track_info(edit, effect, item).ok().flatten();
+    let info = track_info(edit, effect, item).ok();
     let current_value = edit.get_effect_item_value(effect, item).ok();
     let mut track = current_value
         .as_deref()
@@ -243,8 +315,22 @@ fn apply_to_track(
     track.enable_midpoints();
 
     let nonce = registry::nonce();
-    track.set_movement(SCRIPT_MODE_NAME, vec![curve_id as f64, nonce as f64]);
+    let segment_count = track.values.len().saturating_sub(1).max(1);
+    let mut segment_ids = track.segment_curve_ids(SCRIPT_MODE_NAME, segment_count, curve_id);
+    match segment {
+        Some(index) if index < segment_ids.len() => segment_ids[index] = curve_id,
+        _ => segment_ids.fill(curve_id),
+    }
+    let mut params = Vec::with_capacity(segment_ids.len() + 2);
+    params.push(0.0); // 区間IDリスト形式の目印
+    params.extend(segment_ids.iter().map(|id| *id as f64));
+    params.push(nonce as f64);
+    track.set_movement(SCRIPT_MODE_NAME, params);
     let value = track.to_string();
-    tracing::debug!("Apply curve {curve_id} to {item}: {value}");
+    tracing::debug!(
+        "Apply curve {curve_id} to {item} (segment {:?}, ids {:?}): {value}",
+        segment,
+        segment_ids
+    );
     edit.set_effect_item_value(effect, item, &value).is_ok()
 }

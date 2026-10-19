@@ -69,6 +69,21 @@ pub fn handle_ipc(request: Request<String>) {
         "apply" => handle_apply_request(&value, "applied"),
         "drop" => handle_apply_request(&value, "applied"),
         "start_drag" => handle_start_drag(&value),
+        "prepare_drag" => crate::trackbar::warm_cache(),
+        "get_segments" => handle_get_segments(),
+        "select_segment" => handle_select_segment(&value),
+        "debug_trackbars" => {
+            let snapshot = crate::trackbar::debug_snapshot();
+            tracing::info!(
+                "HL_Ezing trackbar diagnostics (IPC):\n{}",
+                serde_json::to_string_pretty(&snapshot).unwrap_or_default()
+            );
+            send_event(serde_json::json!({
+                "event": "trackbar_debug",
+                "ok": true,
+                "snapshot": snapshot,
+            }));
+        }
         "get_tracks" => handle_get_tracks(),
         "get_curves" => handle_get_curves(),
         "create_curve" => handle_create_curve(&value),
@@ -193,8 +208,8 @@ fn handle_delete_curve(value: &serde_json::Value) {
     send_event(serde_json::json!({"event":"curve_deleted","ok":true,"id":id}));
 }
 
-/// ドラッグ開始。現状のAviUtl2公開APIではウィンドウ外のトラックバー位置を
-/// 取得できないため、ここでは「適用」は行わず、ドラッグ状態だけを返す。
+/// ドラッグ開始。実際のトラックバー探索と適用は `trackbar` モジュールの
+/// ワーカースレッドが行う。ここではカーブIDの検証と開始可否だけを返す。
 fn handle_start_drag(value: &serde_json::Value) {
     let Some(id) = value.get("curve_id").and_then(|id| id.as_u64()) else {
         send_event(
@@ -208,7 +223,115 @@ fn handle_start_drag(value: &serde_json::Value) {
         );
         return;
     }
+    if !crate::trackbar::is_supported() {
+        send_event(serde_json::json!({
+            "event": "drag_started",
+            "ok": false,
+            "id": id,
+            "message": "このAviUtl2ではドラッグ適用を利用できません（RTTI解決失敗）。診断ログを確認してください。",
+        }));
+        return;
+    }
+    if !crate::trackbar::start_drag(id) {
+        send_event(serde_json::json!({
+            "event": "drag_started",
+            "ok": false,
+            "id": id,
+            "message": "ドラッグを開始できませんでした。",
+        }));
+        return;
+    }
     send_event(serde_json::json!({"event":"drag_started","ok":true,"id":id}));
+}
+
+/// オブジェクトの区間情報と、現在フォーカスされている区間を返す。
+fn handle_get_segments() {
+    let result = EDIT_HANDLE.call_edit_section(|edit| -> Result<serde_json::Value, String> {
+        let object = apply::focused_or_first_object(edit)?
+            .ok_or_else(|| "オブジェクトが選択されていません。".to_string())?;
+        let frames = edit
+            .get_object_section_frames(object)
+            .map_err(|e| e.to_string())?;
+        let focus = edit.get_focus_object_section().ok().flatten();
+        let layer_frame = edit.get_object_layer_frame(object).ok();
+        Ok(serde_json::json!({
+            "frames": frames,
+            "focus": focus,
+            "layer_frame": layer_frame.map(|frame| serde_json::json!({
+                "layer": frame.layer,
+                "start": frame.start,
+                "end": frame.end,
+            })),
+        }))
+    });
+    match result {
+        Ok(Ok(mut payload)) => {
+            payload["event"] = "segments".into();
+            payload["ok"] = true.into();
+            send_event(payload);
+        }
+        Ok(Err(message)) => send_event(serde_json::json!({
+            "event": "segments",
+            "ok": false,
+            "frames": [],
+            "message": message,
+        })),
+        Err(error) => send_event(serde_json::json!({
+            "event": "segments",
+            "ok": false,
+            "frames": [],
+            "message": error.to_string(),
+        })),
+    }
+}
+
+/// 区間バーから区間を選び、AviUtl2 のカーソルをその区間の先頭へ移動する。
+fn handle_select_segment(value: &serde_json::Value) {
+    let Some(index) = value.get("index").and_then(|index| index.as_u64()) else {
+        return;
+    };
+    let result = EDIT_HANDLE.call_edit_section(|edit| -> Result<serde_json::Value, String> {
+        let object = apply::focused_or_first_object(edit)?
+            .ok_or_else(|| "オブジェクトが選択されていません。".to_string())?;
+        let frames = edit
+            .get_object_section_frames(object)
+            .map_err(|e| e.to_string())?;
+        let layer_frame = edit
+            .get_object_layer_frame(object)
+            .map_err(|e| e.to_string())?;
+        let index = index as usize;
+        let frame = *frames
+            .get(index)
+            .ok_or_else(|| "区間が見つかりません。".to_string())?;
+        edit.set_cursor_layer_frame(layer_frame.layer, frame)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "frames": frames,
+            "focus": index,
+            "layer_frame": {
+                "layer": layer_frame.layer,
+                "start": layer_frame.start,
+                "end": layer_frame.end,
+            },
+        }))
+    });
+    match result {
+        Ok(Ok(mut payload)) => {
+            payload["event"] = "segments".into();
+            payload["ok"] = true.into();
+            send_event(payload);
+        }
+        Ok(Err(message)) => send_event(serde_json::json!({
+            "event": "segments",
+            "ok": false,
+            "message": message,
+        })),
+        Err(error) => send_event(serde_json::json!({
+            "event": "segments",
+            "ok": false,
+            "message": error.to_string(),
+        })),
+    }
 }
 
 /// 選択オブジェクトの適用可能なトラックバー一覧を返す。
@@ -252,9 +375,10 @@ fn handle_get_tracks() {
                     Err(_) => continue,
                 };
                 let curve_id = info
-                    .as_ref()
-                    .filter(|info| info.mode == apply::SCRIPT_MODE_NAME)
-                    .and_then(|info| info.params.first())
+                    .mode
+                    .as_deref()
+                    .filter(|mode| *mode == apply::SCRIPT_MODE_NAME)
+                    .and_then(|_| info.params.first())
                     .map(|id| *id as u64);
                 tracks.push(serde_json::json!({
                     "effect": effect_name,
@@ -399,7 +523,7 @@ fn parse_curve(value: &serde_json::Value) -> Result<Curve, String> {
     serde_json::from_value(serde_json::Value::Object(tagged)).map_err(|e| e.to_string())
 }
 
-fn curve_to_json(id: u64, curve: &Curve) -> serde_json::Value {
+pub(crate) fn curve_to_json(id: u64, curve: &Curve) -> serde_json::Value {
     let mut value = serde_json::to_value(curve).unwrap_or(serde_json::Value::Null);
     let mode = value
         .get("mode")

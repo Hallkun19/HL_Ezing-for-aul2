@@ -192,6 +192,60 @@ button:active {
   cursor: crosshair;
 }
 
+/* 区間バー */
+.segment-bar {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 48px;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  background: rgba(20, 20, 20, 0.88);
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  font-size: 10px;
+  pointer-events: auto;
+}
+
+.segment-label,
+.segment-hint {
+  color: #888;
+  white-space: nowrap;
+}
+
+.segment-list {
+  display: flex;
+  gap: 3px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.segment-chip {
+  min-width: 22px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: #252525;
+  color: #bbb;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.segment-chip:hover {
+  background: #303030;
+}
+
+.segment-chip.active {
+  background: var(--accent-color);
+  border-color: var(--accent-hover);
+  color: #fff;
+  font-weight: 600;
+}
+
 /* 適用ボタン＆トラックピッカー */
 .apply-wrap {
   position: relative;
@@ -227,6 +281,13 @@ button:active {
   background: #2a2a2a;
   color: #777777;
   cursor: not-allowed;
+}
+
+.apply-btn.dragging {
+  background: #0f766e;
+  cursor: grabbing;
+  outline: 2px dashed rgba(255, 255, 255, 0.75);
+  outline-offset: 2px;
 }
 
 .track-picker {

@@ -118,6 +118,11 @@ impl HasWindowHandle for HlEzingWindow {
     }
 }
 
+/// プラグインのホストHWNDを返す。トラックバー探索の座標系確認用。
+pub fn host_hwnd() -> Option<HWND> {
+    HOST_HWND.get().map(|hwnd| hwnd.get() as HWND)
+}
+
 /// 任意スレッドからWebView2の作成スレッドへJS評価を依頼する。
 pub fn evaluate(script: String) {
     eval_queue().lock().unwrap().push_back(script);

@@ -1296,6 +1296,40 @@ function Presets({ presets, setPresets, settings, style, onLoadPreset }) {
   );
 }
 
+function SegmentBar({ segments, onSelect }) {
+  const frames = Array.isArray(segments.frames) ? segments.frames : [];
+  const count = frames.length;
+  if (count <= 1) return null;
+  const focus = segments.focus ?? 0;
+  const objectEnd = segments.layerFrame?.end;
+  return (
+    <div className="segment-bar" title="AviUtl2のシークバー位置の区間">
+      <span className="segment-label">区間</span>
+      <div className="segment-list">
+        {Array.from({ length: count }, (_, index) => {
+          const start = frames[index];
+          const end = frames[index + 1] ?? objectEnd;
+          return (
+            <button
+              key={index}
+              className={`segment-chip ${index === focus ? "active" : ""}`}
+              onClick={() => onSelect(index)}
+              title={
+                end == null
+                  ? `${start} フレーム`
+                  : `${start} - ${end} フレーム`
+              }
+            >
+              {index + 1}
+            </button>
+          );
+        })}
+      </div>
+      <span className="segment-hint">シークバーの区間</span>
+    </div>
+  );
+}
+
 function AnimatedModal({ open, onClose, children, title }) {
   const [closing, setClosing] = useState(false);
   const [visible, setVisible] = useState(open);
@@ -1385,7 +1419,7 @@ function SavePresetModal({ open, onClose, onSave, defaultName }) {
   );
 }
 
-function SettingsPanelModal({ open, onClose, settings, setSettings }) {
+function SettingsPanelModal({ open, onClose, settings, setSettings, onDebug }) {
   const update = (key, value) => setSettings((s) => ({ ...s, [key]: value }));
   return (
     <AnimatedModal open={open} onClose={onClose} title="設定">
@@ -1447,6 +1481,9 @@ function SettingsPanelModal({ open, onClose, settings, setSettings }) {
           />
         </label>
         <footer className="modal-footer">
+          <button type="button" onClick={onDebug}>
+            ドラッグ診断をログ出力
+          </button>
           <button type="button" className="primary" onClick={onClose}>
             完了
           </button>
@@ -1489,6 +1526,11 @@ function App() {
   const applyWrapRef = useRef(null);
   const [pickerMaxHeight, setPickerMaxHeight] = useState(200);
   const [trackPicker, setTrackPicker] = useState(null);
+  const [segments, setSegments] = useState({ frames: [], focus: null, layerFrame: null });
+  const [draggingToTrackbar, setDraggingToTrackbar] = useState(false);
+  const applyDragRef = useRef(null);
+  const suppressApplyClickRef = useRef(false);
+  const applyDragResetTimer = useRef(null);
 
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -1685,7 +1727,35 @@ function App() {
         return;
       }
 
+      if (event.event === "drag_started") {
+        if (!event.ok) {
+          setDraggingToTrackbar(false);
+          notify(event.message || "ドラッグを開始できませんでした。", "error");
+        }
+        return;
+      }
+
+      if (event.event === "drag_cancelled") {
+        setDraggingToTrackbar(false);
+        notify(event.message || "ドラッグをキャンセルしました。", "error");
+        return;
+      }
+
+      if (event.event === "segments") {
+        if (!event.ok) {
+          setSegments({ frames: [], focus: null, layerFrame: null });
+          return;
+        }
+        setSegments({
+          frames: Array.isArray(event.frames) ? event.frames : [],
+          focus: event.focus ?? null,
+          layerFrame: event.layer_frame || null,
+        });
+        return;
+      }
+
       if (event.event === "applied") {
+        setDraggingToTrackbar(false);
         if (!event.ok) {
           notify(event.message || "適用に失敗しました。", "error");
           return;
@@ -1703,6 +1773,7 @@ function App() {
         );
         if (event.created) setActiveId(curve.id);
         notify(`ID ${event.id} を${event.count}件のトラックバーに適用しました。`);
+        post({ cmd: "get_segments" });
         return;
       }
 
@@ -1719,6 +1790,7 @@ function App() {
         setCurves([]);
         setActiveId(null);
         post({ cmd: "get_curves" });
+        post({ cmd: "get_segments" });
       }
     },
     [notify, post]
@@ -1728,7 +1800,16 @@ function App() {
     window.hlEzing = { onEvent: handleEvent, post };
     post({ cmd: "hello" });
     post({ cmd: "get_curves" });
+    post({ cmd: "get_segments" });
   }, [handleEvent, post]);
+
+  // シークバーを動かしたときに区間バーの選択状態を追従させる。
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!document.hidden) post({ cmd: "get_segments" });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [post]);
 
   // エディタの変更をアクティブIDへ反映する。少し遅延させることで
   // ドラッグ中の連続IPCを抑えつつ、トラック側は即座に追従する。
@@ -1889,6 +1970,84 @@ function App() {
     post({ cmd: "get_tracks" });
   };
 
+  // 「適用」ボタンのクリックは従来どおりピッカーを開き、数ピクセル以上
+  // ドラッグした場合だけ AviUtl2 のトラックバーへのドロップを開始する。
+  const beginApplyDrag = (e) => {
+    if (e.button !== 0 || activeIdRef.current == null) return;
+    if (applyDragResetTimer.current) {
+      clearTimeout(applyDragResetTimer.current);
+      applyDragResetTimer.current = null;
+    }
+    suppressApplyClickRef.current = false;
+    // ドラッグ開始前にスキャンを温めておくと、最初のハイライトまでの
+    // 待ち時間を短縮できる。
+    post({ cmd: "prepare_drag" });
+    applyDragRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      pointerId: e.pointerId,
+      started: false,
+    };
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // ポインタキャプチャ非対応でも、WebView内のドラッグは継続できる。
+    }
+  };
+
+  const moveApplyDrag = (e) => {
+    const drag = applyDragRef.current;
+    if (!drag || drag.started || (e.buttons & 1) === 0) return;
+    if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 6) return;
+    drag.started = true;
+    suppressApplyClickRef.current = true;
+    setTrackPicker(null);
+    setDraggingToTrackbar(true);
+    post({ cmd: "start_drag", curve_id: activeIdRef.current });
+  };
+
+  const endApplyDrag = (e) => {
+    const drag = applyDragRef.current;
+    applyDragRef.current = null;
+    try {
+      if (e.currentTarget.hasPointerCapture?.(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // 既に解放済みの場合は無視する。
+    }
+    if (drag?.started) {
+      // ドラッグ後の click を抑止する。WebView外で離した場合は click が
+      // 発生しないため、少し後にフラグを戻す。
+      if (applyDragResetTimer.current) {
+        clearTimeout(applyDragResetTimer.current);
+      }
+      applyDragResetTimer.current = setTimeout(() => {
+        suppressApplyClickRef.current = false;
+        applyDragResetTimer.current = null;
+      }, 400);
+    } else {
+      suppressApplyClickRef.current = false;
+    }
+  };
+
+  const handleApplyButtonClick = () => {
+    if (suppressApplyClickRef.current) {
+      suppressApplyClickRef.current = false;
+      return;
+    }
+    handleApplyClick();
+  };
+
+  useEffect(
+    () => () => {
+      if (applyDragResetTimer.current) {
+        clearTimeout(applyDragResetTimer.current);
+      }
+    },
+    []
+  );
+
   const handleSavePresetConfirm = (name) => {
     const current = stateRef.current;
     setPresets((list) => [
@@ -2017,19 +2176,30 @@ function App() {
           </button>
         </header>
         <Graph state={state} setState={setState} settings={settings} />
+        <SegmentBar
+          segments={segments}
+          onSelect={(index) => {
+            setSegments((current) => ({ ...current, focus: index }));
+            post({ cmd: "select_segment", index });
+          }}
+        />
         <footer className="floating-footer">
           <div className="apply-wrap" ref={applyWrapRef}>
             <button
-              className="apply-btn"
-              onClick={handleApplyClick}
+              className={`apply-btn ${draggingToTrackbar ? "dragging" : ""}`}
+              onClick={handleApplyButtonClick}
+              onPointerDown={beginApplyDrag}
+              onPointerMove={moveApplyDrag}
+              onPointerUp={endApplyDrag}
+              onPointerCancel={endApplyDrag}
               disabled={activeId == null}
               title={
                 activeId == null
                   ? "カーブIDを作成してください"
-                  : "適用先プロパティを選択"
+                  : "クリックで適用先を選択 / ドラッグでトラックバーへ適用"
               }
             >
-              <MdPlayArrow /> 適用
+              <MdPlayArrow /> {draggingToTrackbar ? "ドロップ" : "適用"}
             </button>
             {trackPicker && (
               <div
@@ -2105,6 +2275,10 @@ function App() {
         onClose={() => setShowSettings(false)}
         settings={settings}
         setSettings={setSettings}
+        onDebug={() => {
+          post({ cmd: "debug_trackbars" });
+          notify("トラックバー診断情報をログへ出力しました。");
+        }}
       />
     </div>
   );
