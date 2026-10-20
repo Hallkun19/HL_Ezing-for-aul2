@@ -16,6 +16,9 @@ use super::Curve;
 /// 最後に適用したカーブが無いことを表す番兵値。
 const NO_LAST_APPLIED: u64 = u64::MAX;
 
+/// UI と内部割り当てIDの上限。0 は「未設定」として予約する。
+pub const MAX_CURVE_ID: u64 = 999_999;
+
 pub struct CurveRegistry {
     curves: HashMap<u64, Arc<Curve>>,
     next_id: u64,
@@ -39,7 +42,7 @@ impl Default for CurveRegistry {
 impl CurveRegistry {
     /// カーブを登録し、IDを返す。IDは1から始まる。
     pub fn register(&mut self, curve: Curve) -> u64 {
-        if self.next_id == 0 {
+        if self.next_id == 0 || self.next_id > MAX_CURVE_ID {
             self.next_id = 1;
         }
         let id = self.next_id;
@@ -50,7 +53,7 @@ impl CurveRegistry {
 
     /// 指定IDでカーブを登録する。既に存在する場合や 0 の場合は false。
     pub fn register_with_id(&mut self, id: u64, curve: Curve) -> bool {
-        if id == 0 || self.curves.contains_key(&id) {
+        if id == 0 || id > MAX_CURVE_ID || self.curves.contains_key(&id) {
             return false;
         }
         self.curves.insert(id, Arc::new(curve));
@@ -76,11 +79,11 @@ impl CurveRegistry {
     }
 
     pub fn contains(&self, id: u64) -> bool {
-        self.curves.contains_key(&id)
+        id != 0 && self.curves.contains_key(&id)
     }
 
     pub fn get(&self, id: u64) -> Option<Arc<Curve>> {
-        self.curves.get(&id).cloned()
+        (id != 0).then(|| self.curves.get(&id).cloned()).flatten()
     }
 
     /// 区間IDリストを新しい割り当てとして登録する。
@@ -92,16 +95,6 @@ impl CurveRegistry {
         self.next_assignment = self.next_assignment.saturating_add(1);
         self.assignments.insert(id, segment_ids);
         id
-    }
-
-    /// 既存の割り当てを差し替える。
-    pub fn set_assignment(&mut self, id: u64, segment_ids: Vec<u64>) -> bool {
-        if let Some(slot) = self.assignments.get_mut(&id) {
-            *slot = segment_ids;
-            true
-        } else {
-            false
-        }
     }
 
     pub fn assignment(&self, id: u64) -> Option<Vec<u64>> {
@@ -156,6 +149,9 @@ impl CurveRegistry {
         self.assignments.clear();
         self.next_assignment = 1;
         for (id, curve) in entries {
+            if id == 0 || id > MAX_CURVE_ID {
+                continue;
+            }
             self.curves.insert(id, Arc::new(curve));
             if id >= self.next_id {
                 self.next_id = id.saturating_add(1);
@@ -213,10 +209,6 @@ pub fn nonce() -> u64 {
 
 pub fn create_assignment(segment_ids: Vec<u64>) -> u64 {
     registry().write().unwrap().create_assignment(segment_ids)
-}
-
-pub fn set_assignment(id: u64, segment_ids: Vec<u64>) -> bool {
-    registry().write().unwrap().set_assignment(id, segment_ids)
 }
 
 pub fn assignment(id: u64) -> Option<Vec<u64>> {
@@ -302,12 +294,11 @@ mod tests {
         let mut registry = CurveRegistry::default();
         let id = registry.create_assignment(vec![3, 4, 5]);
         assert_eq!(registry.assignment(id), Some(vec![3, 4, 5]));
-        assert!(registry.set_assignment(id, vec![6, 7]));
-        assert_eq!(registry.assignment_curve(id, 1), Some(7));
+        assert_eq!(registry.assignment_curve(id, 1), Some(4));
         let snapshot = registry.assignment_snapshot();
         let mut loaded = CurveRegistry::default();
         loaded.load_assignments(snapshot);
-        assert_eq!(loaded.assignment(id), Some(vec![6, 7]));
+        assert_eq!(loaded.assignment(id), Some(vec![3, 4, 5]));
         let next = loaded.create_assignment(vec![1]);
         assert!(next > id);
     }

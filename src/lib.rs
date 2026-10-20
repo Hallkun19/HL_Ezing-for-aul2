@@ -81,14 +81,21 @@ impl aviutl2::generic::GenericPlugin for HlEzingPlugin {
     }
 
     fn on_project_load(&mut self, project: &mut aviutl2::generic::ProjectFile) {
+        trackbar::invalidate_cache();
         curve::registry::clear_last_applied();
         match project.deserialize::<Vec<(u64, Curve)>>(curve::apply::PROJECT_KEY) {
             Ok(entries) => {
-                let entries = entries
-                    .into_iter()
-                    .map(|(id, curve)| (id, curve.sanitized()))
-                    .collect();
-                curve::registry::load(entries);
+                const MAX_CURVES: usize = 4096;
+                if entries.len() > MAX_CURVES {
+                    tracing::warn!("Too many curves in project: {}", entries.len());
+                    curve::registry::clear();
+                } else {
+                    let entries = entries
+                        .into_iter()
+                        .map(|(id, curve)| (id, curve.sanitized()))
+                        .collect();
+                    curve::registry::load(entries);
+                }
                 tracing::info!(
                     "Loaded {} curves from project.",
                     curve::registry::snapshot().len()
@@ -102,7 +109,20 @@ impl aviutl2::generic::GenericPlugin for HlEzingPlugin {
 
         match project.deserialize::<Vec<(u64, Vec<u64>)>>(curve::apply::ASSIGNMENTS_KEY) {
             Ok(entries) => {
-                curve::registry::load_assignments(entries);
+                const MAX_ASSIGNMENTS: usize = 100_000;
+                if entries.len() > MAX_ASSIGNMENTS {
+                    tracing::warn!("Too many segment assignments in project: {}", entries.len());
+                    curve::registry::load_assignments(Vec::new());
+                } else {
+                    let entries = entries
+                        .into_iter()
+                        .map(|(id, mut ids)| {
+                            ids.truncate(256);
+                            (id, ids)
+                        })
+                        .collect();
+                    curve::registry::load_assignments(entries);
+                }
                 tracing::info!(
                     "Loaded {} segment assignments from project.",
                     curve::registry::assignment_snapshot().len()
@@ -142,6 +162,7 @@ impl aviutl2::generic::GenericPlugin for HlEzingPlugin {
     }
 
     fn on_clear_cache(&mut self, _edit_section: &aviutl2::generic::EditSection) {
+        trackbar::invalidate_cache();
         // カーブデータはプロジェクト内に保持しており、キャッシュ破棄の影響は受けない。
         tracing::debug!("Cache cleared.");
     }
@@ -154,10 +175,20 @@ impl aviutl2::generic::GenericPlugin for HlEzingPlugin {
     }
 
     fn event_change_focus_object(&mut self) {
+        trackbar::invalidate_cache();
+        notify_object_changed();
         notify_segments_dirty();
     }
 
     fn event_update_object_info(&mut self) {
+        trackbar::invalidate_cache();
+        notify_object_changed();
+        notify_segments_dirty();
+    }
+
+    fn event_change_scene_info(&mut self) {
+        trackbar::invalidate_cache();
+        notify_object_changed();
         notify_segments_dirty();
     }
 }
@@ -166,9 +197,13 @@ fn notify_segments_dirty() {
     window::evaluate("window.hlEzing && window.hlEzing.onEvent({event:'segments_dirty'})".into());
 }
 
+fn notify_object_changed() {
+    window::evaluate("window.hlEzing && window.hlEzing.onEvent({event:'object_changed'})".into());
+}
+
 impl HlEzingPlugin {
     fn init_logging() {
-        aviutl2::tracing_subscriber::fmt()
+        let _ = aviutl2::tracing_subscriber::fmt()
             .with_max_level(if cfg!(debug_assertions) {
                 tracing::Level::DEBUG
             } else {
@@ -176,7 +211,7 @@ impl HlEzingPlugin {
             })
             .event_format(aviutl2::logger::AviUtl2Formatter)
             .with_writer(aviutl2::logger::AviUtl2LogWriter)
-            .init();
+            .try_init();
     }
 }
 
@@ -187,6 +222,9 @@ impl HlEzingPlugin {
         let Some(curve_id) = curve::registry::last_applied() else {
             anyhow::bail!("HL_Ezingで適用したカーブがありません。");
         };
+        if !ipc::EDIT_HANDLE.is_ready() {
+            anyhow::bail!("編集セクションの初期化が完了していません。");
+        }
         let result = ipc::EDIT_HANDLE
             .call_edit_section(|edit| curve::apply::apply_to_selection(edit, curve_id))?
             .map_err(aviutl2::anyhow::Error::msg)?;

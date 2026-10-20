@@ -13,6 +13,14 @@ pub const FRONTEND_URL: &str = "hl-ezing://localhost/index.html";
 pub static EDIT_HANDLE: aviutl2::generic::GlobalEditHandle =
     aviutl2::generic::GlobalEditHandle::new();
 
+/// WebView2 のカスタムプロトコル変換を含めた、埋め込み UI の URL 判定。
+pub(crate) fn is_trusted_ui_uri(uri: &str) -> bool {
+    uri == "about:blank"
+        || uri.starts_with("hl-ezing://localhost/")
+        || uri.starts_with("http://hl-ezing.localhost/")
+        || uri.starts_with("https://hl-ezing.localhost/")
+}
+
 /// 埋め込みアセット (path, content_type, content)。
 const ASSETS: &[(&str, &str, &str)] = &[
     (
@@ -57,7 +65,19 @@ pub fn serve_asset(_id: wry::WebViewId, request: Request<Vec<u8>>) -> Response<C
 
 /// JS (`window.ipc.postMessage`) からのIPCメッセージを処理する。
 pub fn handle_ipc(request: Request<String>) {
+    // 埋め込み UI 以外のドキュメントから IPC が呼ばれても実行しない。
+    // Windows の WebView2 はカスタムプロトコルを
+    // http://hl-ezing.localhost/ に変換するため、その形も許可する。
+    let uri = request.uri();
+    if !is_trusted_ui_uri(&uri.to_string()) {
+        tracing::warn!("Rejected IPC from unexpected origin: {uri}");
+        return;
+    }
     let body = request.body().clone();
+    if body.len() > 4 * 1024 * 1024 {
+        tracing::warn!("Rejected oversized IPC message: {} bytes", body.len());
+        return;
+    }
     tracing::debug!("IPC: {body}");
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
         return;
@@ -65,23 +85,22 @@ pub fn handle_ipc(request: Request<String>) {
     let Some(cmd) = value.get("cmd").and_then(|c| c.as_str()) else {
         return;
     };
-    match cmd {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match cmd {
         "apply" => handle_apply_request(&value, "applied"),
         "drop" => handle_apply_request(&value, "applied"),
         "start_drag" => handle_start_drag(&value),
         "prepare_drag" => crate::trackbar::warm_cache(),
+        "host_space" => {
+            crate::window::forward_space_to_main();
+        }
         "get_segments" => handle_get_segments(),
         "select_segment" => handle_select_segment(&value),
         "debug_trackbars" => {
-            let snapshot = crate::trackbar::debug_snapshot();
-            tracing::info!(
-                "HL_Ezing trackbar diagnostics (IPC):\n{}",
-                serde_json::to_string_pretty(&snapshot).unwrap_or_default()
-            );
+            crate::trackbar::log_debug_snapshot();
             send_event(serde_json::json!({
                 "event": "trackbar_debug",
                 "ok": true,
-                "snapshot": snapshot,
+                "message": "診断情報をバックグラウンドでログへ出力しています。",
             }));
         }
         "get_tracks" => handle_get_tracks(),
@@ -100,6 +119,14 @@ pub fn handle_ipc(request: Request<String>) {
             "version": env!("CARGO_PKG_VERSION"),
         })),
         _ => tracing::warn!("Unknown IPC command: {cmd}"),
+    }));
+    if result.is_err() {
+        tracing::error!("IPC handler panicked for command {cmd}");
+        send_event(serde_json::json!({
+            "event": "ipc_error",
+            "ok": false,
+            "message": "IPC処理中にエラーが発生しました。",
+        }));
     }
 }
 
@@ -246,9 +273,23 @@ fn handle_start_drag(value: &serde_json::Value) {
 
 /// オブジェクトの区間情報と、現在フォーカスされている区間を返す。
 fn handle_get_segments() {
+    if !EDIT_HANDLE.is_ready() {
+        send_event(serde_json::json!({
+            "event": "segments",
+            "ok": false,
+            "frames": [],
+            "message": "編集セクションの初期化が完了していません。",
+        }));
+        return;
+    }
     let result = EDIT_HANDLE.call_edit_section(|edit| -> Result<serde_json::Value, String> {
         let object = apply::focused_or_first_object(edit)?
             .ok_or_else(|| "オブジェクトが選択されていません。".to_string())?;
+        if let Ok(count) = apply::migrate_legacy_tracks(edit, object)
+            && count > 0
+        {
+            tracing::info!("Migrated {count} legacy HL_Ezing tracks.");
+        }
         let frames = edit
             .get_object_section_frames(object)
             .map_err(|e| e.to_string())?;
@@ -290,6 +331,14 @@ fn handle_select_segment(value: &serde_json::Value) {
     let Some(index) = value.get("index").and_then(|index| index.as_u64()) else {
         return;
     };
+    if !EDIT_HANDLE.is_ready() {
+        send_event(serde_json::json!({
+            "event": "segments",
+            "ok": false,
+            "message": "編集セクションの初期化が完了していません。",
+        }));
+        return;
+    }
     let result = EDIT_HANDLE.call_edit_section(|edit| -> Result<serde_json::Value, String> {
         let object = apply::focused_or_first_object(edit)?
             .ok_or_else(|| "オブジェクトが選択されていません。".to_string())?;
@@ -336,19 +385,27 @@ fn handle_select_segment(value: &serde_json::Value) {
 
 /// 選択オブジェクトの適用可能なトラックバー一覧を返す。
 fn handle_get_tracks() {
+    if !EDIT_HANDLE.is_ready() {
+        send_event(serde_json::json!({
+            "event": "tracks",
+            "ok": false,
+            "message": "編集セクションの初期化が完了していません。",
+            "tracks": [],
+        }));
+        return;
+    }
     let result = EDIT_HANDLE.call_edit_section(|edit| {
-        let mut objects = edit.get_selected_objects().map_err(|e| e.to_string())?;
-        if objects.is_empty()
-            && let Some(obj) = edit.get_focused_object().map_err(|e| e.to_string())?
-        {
-            objects.push(obj);
-        }
-        let Some(object) = objects.first() else {
+        let Some(object) = apply::focused_or_first_object(edit)? else {
             return Err("オブジェクトが選択されていません。".to_string());
         };
+        if let Ok(count) = apply::migrate_legacy_tracks(edit, object)
+            && count > 0
+        {
+            tracing::info!("Migrated {count} legacy HL_Ezing tracks.");
+        }
 
         let mut tracks = Vec::<serde_json::Value>::new();
-        let effects = edit.get_effects(*object).map_err(|e| e.to_string())?;
+        let effects = edit.get_effects(object).map_err(|e| e.to_string())?;
         // 同名エフェクトが複数ある場合にラベルを区別するための出現回数
         let mut counts = std::collections::HashMap::<String, usize>::new();
         for effect in &effects {
@@ -379,7 +436,17 @@ fn handle_get_tracks() {
                     .as_deref()
                     .filter(|mode| *mode == apply::SCRIPT_MODE_NAME)
                     .and_then(|_| info.params.first())
-                    .map(|id| *id as u64);
+                    .and_then(|value| {
+                        let value = *value as u64;
+                        if value >= apply::ASSIGNMENT_PARAM_OFFSET {
+                            curve::registry::assignment_curve(
+                                value - apply::ASSIGNMENT_PARAM_OFFSET,
+                                0,
+                            )
+                        } else {
+                            (value > 0).then_some(value)
+                        }
+                    });
                 tracks.push(serde_json::json!({
                     "effect": effect_name,
                     "effect_index": idx,
@@ -410,6 +477,14 @@ fn handle_get_tracks() {
 /// 適用リクエスト。`{curve_id, mode, data, ...}` のカーブを登録/更新し、
 /// 対象トラックへ適用する。`apply` と `drop` で共通。
 fn handle_apply_request(value: &serde_json::Value, event: &str) {
+    if !EDIT_HANDLE.is_ready() {
+        send_event(serde_json::json!({
+            "event": event,
+            "ok": false,
+            "message": "編集セクションの初期化が完了していません。",
+        }));
+        return;
+    }
     let requested_id = value.get("curve_id").and_then(|id| id.as_u64());
     let parsed_curve = if value.get("data").is_some() {
         match parse_curve(value) {

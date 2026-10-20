@@ -11,6 +11,10 @@ import {
   MdBookmarkAdd,
   MdDelete,
   MdSettings,
+  MdLink,
+  MdLinkOff,
+  MdKeyboardArrowUp,
+  MdKeyboardArrowDown,
 } from "react-icons/md";
 import "./style.css";
 
@@ -33,29 +37,71 @@ function curveDataFromState(state) {
       : state.bounceData;
 }
 
+const isFiniteNumber = (value) =>
+  typeof value === "number" && Number.isFinite(value);
+const isPoint = (value) =>
+  value &&
+  typeof value === "object" &&
+  [value.anchor, value.inHandle, value.outHandle].every(
+    (pair) =>
+      Array.isArray(pair) &&
+      pair.length === 2 &&
+      pair.every(isFiniteNumber)
+  ) &&
+  (value.handlesLinked == null ||
+    typeof value.handlesLinked === "boolean");
+
 function isValidCurveData(mode, data) {
   if (!data || typeof data !== "object") return false;
   if (mode === "bezier") {
     return (
       Array.isArray(data.points) &&
       data.points.length >= 2 &&
-      data.points.every(
-        (point) =>
-          Array.isArray(point.anchor) &&
-          Array.isArray(point.inHandle) &&
-          Array.isArray(point.outHandle)
-      )
+      data.points.length <= 256 &&
+      data.points.every(isPoint)
     );
   }
   if (mode === "elastic") {
-    return ["amplitude", "frequency", "decay"].every((key) =>
-      Number.isFinite(Number(data[key]))
+    return (
+      ["amplitude", "frequency", "decay"].every((key) =>
+        isFiniteNumber(data[key])
+      ) &&
+      (data.reversed === undefined || typeof data.reversed === "boolean")
     );
   }
   if (mode === "bounce") {
-    return ["cor", "period"].every((key) => Number.isFinite(Number(data[key])));
+    return (
+      ["cor", "period"].every((key) => isFiniteNumber(data[key])) &&
+      (data.reversed === undefined || typeof data.reversed === "boolean")
+    );
   }
   return false;
+}
+
+function handlesAreLinked(point) {
+  if (point.handlesLinked === true) return true;
+  if (point.handlesLinked === false) return false;
+  // 古いプリセットなど、フラグがないデータは実際の形状から推測する。
+  const [anchorX, anchorY] = point.anchor;
+  return (
+    Math.abs(point.inHandle[0] + point.outHandle[0] - 2 * anchorX) < 1e-6 &&
+    Math.abs(point.inHandle[1] + point.outHandle[1] - 2 * anchorY) < 1e-6
+  );
+}
+
+function isEditableTarget(target) {
+  const element = target instanceof Element ? target : null;
+  return Boolean(
+    element &&
+    (element.isContentEditable ||
+      element.closest("input, textarea, select, [contenteditable='true']"))
+  );
+}
+
+function isSpaceShortcutTarget(target) {
+  // 入力欄以外では Space を AviUtl2 本体へ渡す。ボタンにフォーカスが
+  // 残っていても「適用」の再実行ではなく再生/停止になる。
+  return !isEditableTarget(target);
 }
 
 function stateWithCurve(state, curve) {
@@ -96,6 +142,7 @@ function sanitizeSettings(value) {
       : "right",
     presetPanelSize: clamp(Number(value?.presetPanelSize) || 200, 60, 2000),
     presetBoxSize: clamp(Number(value?.presetBoxSize) || 78, 40, 140),
+    showPresetPanel: value?.showPresetPanel !== false,
     compactMode: true,
     gridLinesX: clamp(Number(value?.gridLinesX) || 4, 1, 50),
     gridLinesY: clamp(Number(value?.gridLinesY) || 4, 1, 50),
@@ -168,12 +215,14 @@ function defaultBezier() {
         outType: "bezier",
         outElasticParams: clone(DEFAULT_ELASTIC),
         outBounceParams: clone(DEFAULT_BOUNCE),
+        handlesLinked: true,
       },
       {
         anchor: [1, 1],
         inHandle: [0.67, 1],
         outHandle: [1, 1],
         outType: "bezier",
+        handlesLinked: true,
       },
     ],
   };
@@ -322,15 +371,43 @@ function evalBezier(data, x) {
 }
 
 function clampHandles(points) {
+  const lastIndex = points.length - 1;
   for (let i = 0; i < points.length; i++) {
     const p = points[i];
     const prevX = i > 0 ? points[i - 1].anchor[0] : 0;
-    const nextX = i < points.length - 1 ? points[i + 1].anchor[0] : 1;
-    if (p.inHandle) {
-      p.inHandle[0] = clamp(p.inHandle[0], prevX, p.anchor[0]);
-    }
-    if (p.outHandle) {
-      p.outHandle[0] = clamp(p.outHandle[0], p.anchor[0], nextX);
+    const nextX = i < lastIndex ? points[i + 1].anchor[0] : 1;
+    const [anchorX, anchorY] = p.anchor;
+
+    if (i > 0 && i < lastIndex && handlesAreLinked(p)) {
+      // 統合時は左右を完全な点対称にする。前後のアンカー範囲に
+      // はみ出す場合は、両方を同じ比率で縮めて角度と長さを保つ。
+      let vx = p.outHandle[0] - anchorX;
+      let vy = p.outHandle[1] - anchorY;
+      if (vx < 0) vx = 0;
+      if (Math.abs(vx) < 1e-12 && Math.abs(vy) < 1e-12) {
+        vx = Math.max(0, anchorX - p.inHandle[0]);
+        vy = anchorY - p.inHandle[1];
+      }
+
+      const maxDx = Math.max(0, Math.min(anchorX - prevX, nextX - anchorX));
+      const maxDy = Math.max(0, 10 - Math.abs(anchorY));
+      let scale = 1;
+      if (Math.abs(vx) > maxDx && Math.abs(vx) > 0) {
+        scale = Math.min(scale, maxDx / Math.abs(vx));
+      }
+      if (Math.abs(vy) > maxDy && Math.abs(vy) > 0) {
+        scale = Math.min(scale, maxDy / Math.abs(vy));
+      }
+      if (!Number.isFinite(scale)) scale = 0;
+      p.outHandle = [anchorX + vx * scale, anchorY + vy * scale];
+      p.inHandle = [anchorX - vx * scale, anchorY - vy * scale];
+    } else {
+      if (p.inHandle) {
+        p.inHandle[0] = clamp(p.inHandle[0], prevX, anchorX);
+      }
+      if (p.outHandle) {
+        p.outHandle[0] = clamp(p.outHandle[0], anchorX, nextX);
+      }
     }
   }
 }
@@ -483,7 +560,7 @@ function IdInput({ value, onCommit }) {
   );
 }
 
-function Graph({ state, setState, settings }) {
+function Graph({ state, setState, settings, onCommitEdit }) {
   const ref = useRef(null);
   const view = useRef({ x: 0.5, y: 0.5, zoom: 1.2 }); // 0.75倍の初期ズーム表示
   const drag = useRef(null);
@@ -901,6 +978,8 @@ function Graph({ state, setState, settings }) {
   };
 
   const onDown = (e) => {
+    // グラフ操作後も Space / Ctrl+Z を WebView 側で受け取れるようにする。
+    ref.current?.focus({ preventScroll: true });
     if (e.button === 2) return;
     const r = ref.current.getBoundingClientRect();
     const x = e.clientX - r.left;
@@ -912,8 +991,8 @@ function Graph({ state, setState, settings }) {
     if (e.button === 0) {
       const h = hit(x, y);
       if (h) {
-        // Altを押しながらのドラッグでも、ハンドル・アンカーを掴んだら
-        // そちらを優先して操作する(Altはハンドルの個別独立操作用)
+        // ハンドル・アンカーを掴んだら、そちらを優先して操作する。
+        // 分離/統合は右クリックメニューで切り替える。
         let originalHandles = null;
         if (state.mode === "bezier") {
           originalHandles = state.bezierData.points.map((p) => ({
@@ -923,7 +1002,11 @@ function Graph({ state, setState, settings }) {
             outY: p.outHandle ? p.outHandle[1] - p.anchor[1] : 0,
           }));
         }
-        drag.current = { ...h, originalHandles };
+        drag.current = {
+          ...h,
+          originalHandles,
+          startState: clone(state),
+        };
       } else if (keys.current.alt) {
         // 何も掴んでいない場合のみ Altドラッグでパン
         drag.current = { kind: "pan", x, y, view: clone(view.current) };
@@ -968,21 +1051,20 @@ function Graph({ state, setState, settings }) {
     ) {
       const pts = clone(state.bezierData.points);
       const p = pts[drag.current.index];
-      p[drag.current.kind === "in" ? "inHandle" : "outHandle"] = value;
-      if (!keys.current.alt) {
-        const key = drag.current.kind === "in" ? "inHandle" : "outHandle";
-        const other = key === "inHandle" ? "outHandle" : "inHandle";
-        const dx = value[0] - p.anchor[0];
-        const dy = value[1] - p.anchor[1];
-        const len =
-          Math.hypot(
-            p[other][0] - p.anchor[0],
-            p[other][1] - p.anchor[1]
-          ) || 0.0001;
-        const n = Math.hypot(dx, dy) || 1;
+      const linked = handlesAreLinked(p);
+      const isIn = drag.current.kind === "in";
+      const handleValue = [
+        isIn
+          ? Math.min(p.anchor[0], value[0])
+          : Math.max(p.anchor[0], value[0]),
+        value[1],
+      ];
+      p[isIn ? "inHandle" : "outHandle"] = handleValue;
+      if (linked) {
+        const other = isIn ? "outHandle" : "inHandle";
         p[other] = [
-          p.anchor[0] - (dx / n) * len,
-          p.anchor[1] - (dy / n) * len,
+          2 * p.anchor[0] - handleValue[0],
+          2 * p.anchor[1] - handleValue[1],
         ];
       }
       clampHandles(pts);
@@ -1105,10 +1187,12 @@ function Graph({ state, setState, settings }) {
           inHandle: [value[0] - handleLen, value[1]],
           outHandle: [value[0] + handleLen, value[1]],
           outType: "bezier",
+          handlesLinked: true,
         });
       }
     }
     clampHandles(pts);
+    onCommitEdit(state);
     setState((s) => ({ ...s, bezierData: { points: pts } }));
   };
 
@@ -1120,7 +1204,7 @@ function Graph({ state, setState, settings }) {
     const y = e.clientY - r.top;
     const h = hit(x, y);
 
-    if (h && h.kind === "anchor") {
+    if (h && (h.kind === "anchor" || h.kind === "in" || h.kind === "out")) {
       setContextMenu({
         x: e.clientX,
         y: e.clientY,
@@ -1133,7 +1217,11 @@ function Graph({ state, setState, settings }) {
 
   useEffect(() => {
     const up = () => {
+      const ended = drag.current;
       drag.current = null;
+      if (ended?.startState && ended.kind !== "pan") {
+        onCommitEdit(ended.startState);
+      }
     };
     const closeMenu = () => setContextMenu(null);
     window.addEventListener("mouseup", up);
@@ -1142,7 +1230,7 @@ function Graph({ state, setState, settings }) {
       window.removeEventListener("mouseup", up);
       window.removeEventListener("click", closeMenu);
     };
-  }, []);
+  }, [onCommitEdit]);
 
   return (
     <div className="graph-wrap" style={{ position: "relative" }}>
@@ -1157,6 +1245,7 @@ function Graph({ state, setState, settings }) {
       )}
       <canvas
         ref={ref}
+        tabIndex={-1}
         onMouseDown={onDown}
         onMouseMove={onMove}
         onDoubleClick={onDouble}
@@ -1197,6 +1286,7 @@ function Graph({ state, setState, settings }) {
                       clone(DEFAULT_BOUNCE);
                   }
                 }
+                onCommitEdit(state);
                 setState((s) => ({ ...s, bezierData: { points: pts } }));
                 setContextMenu(null);
               }}
@@ -1213,11 +1303,39 @@ function Graph({ state, setState, settings }) {
               <>
                 <div className="context-menu-divider" />
                 <button
+                  className="context-menu-item"
+                  onClick={() => {
+                    const pts = clone(state.bezierData.points);
+                    const point = pts[contextMenu.pointIndex];
+                    if (point) {
+                      point.handlesLinked = !handlesAreLinked(point);
+                      clampHandles(pts);
+                    }
+                    onCommitEdit(state);
+                    setState((s) => ({ ...s, bezierData: { points: pts } }));
+                    setContextMenu(null);
+                  }}
+                >
+                  {state.bezierData.points[contextMenu.pointIndex] &&
+                  handlesAreLinked(
+                    state.bezierData.points[contextMenu.pointIndex]
+                  ) ? (
+                    <>
+                      <MdLinkOff /> ハンドルを分離
+                    </>
+                  ) : (
+                    <>
+                      <MdLink /> ハンドルを統合
+                    </>
+                  )}
+                </button>
+                <button
                   className="context-menu-item danger"
                   onClick={() => {
                     const pts = clone(state.bezierData.points);
                     pts.splice(contextMenu.pointIndex, 1);
                     clampHandles(pts);
+                    onCommitEdit(state);
                     setState((s) => ({ ...s, bezierData: { points: pts } }));
                     setContextMenu(null);
                   }}
@@ -1519,6 +1637,68 @@ function SettingsPanelModal({ open, onClose, settings, setSettings, onDebug }) {
   );
 }
 
+function PresetDivider({
+  vertical,
+  before,
+  visible,
+  onToggle,
+  onResizeStart,
+}) {
+  const outward = vertical ? (
+    before ? <MdKeyboardArrowUp /> : <MdKeyboardArrowDown />
+  ) : before ? (
+    <MdChevronLeft />
+  ) : (
+    <MdChevronRight />
+  );
+  const inward = vertical ? (
+    before ? <MdKeyboardArrowDown /> : <MdKeyboardArrowUp />
+  ) : before ? (
+    <MdChevronRight />
+  ) : (
+    <MdChevronLeft />
+  );
+
+  if (!visible) {
+    const edgeClass = vertical
+      ? before
+        ? "edge-top"
+        : "edge-bottom"
+      : before
+        ? "edge-left"
+        : "edge-right";
+    return (
+      <button
+        type="button"
+        className={`panel-edge-toggle ${edgeClass}`}
+        title="プリセット欄を表示"
+        aria-label="プリセット欄を表示"
+        onClick={onToggle}
+      >
+        {inward}
+      </button>
+    );
+  }
+
+  return (
+    <div
+      className={`resizer ${vertical ? "horizontal" : "vertical"}`}
+      onMouseDown={onResizeStart}
+    >
+      <button
+        type="button"
+        className="panel-toggle"
+        title="プリセット欄を隠す"
+        aria-label="プリセット欄を隠す"
+        onMouseDown={(event) => event.stopPropagation()}
+        onClick={onToggle}
+      >
+        {outward}
+      </button>
+    </div>
+  );
+}
+
 function App() {
   const [state, setState] = useState({
     mode: "bezier",
@@ -1569,7 +1749,9 @@ function App() {
   const noticeTimer = useRef(null);
   const bootstrappedRef = useRef(false);
   const lastSentRef = useRef(null);
+  const pendingUpdateRef = useRef(null);
   const tracksRequestRef = useRef(null);
+  const historyRef = useRef({ undo: [], redo: [] });
 
   const post = useCallback((message) => {
     window.ipc?.postMessage(JSON.stringify(message));
@@ -1581,6 +1763,106 @@ function App() {
     noticeTimer.current = setTimeout(() => setNotice(null), 3200);
   }, []);
 
+  const flushPendingUpdate = useCallback(() => {
+    const pending = pendingUpdateRef.current;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingUpdateRef.current = null;
+    lastSentRef.current = pending.payload;
+    post(pending.message);
+  }, [post]);
+
+  const recordHistory = useCallback((beforeState, id = activeIdRef.current) => {
+    if (id == null || !beforeState) return;
+    const history = historyRef.current;
+    history.undo.push({ id, state: clone(beforeState) });
+    if (history.undo.length > 100) history.undo.shift();
+    history.redo = [];
+  }, []);
+
+  const commitHistory = useCallback(
+    (beforeState) => {
+      if (activeIdRef.current == null || !beforeState) return;
+      if (JSON.stringify(beforeState) === JSON.stringify(stateRef.current)) {
+        return;
+      }
+      recordHistory(beforeState);
+    },
+    [recordHistory]
+  );
+
+  const applyHistoryEntry = useCallback(
+    (entry) => {
+      if (!entry || !curvesRef.current.some((curve) => curve.id === entry.id)) {
+        return false;
+      }
+      flushPendingUpdate();
+      if (activeIdRef.current != null) {
+        const current = stateRef.current;
+        const data = clone(curveDataFromState(current));
+        setCurves((list) =>
+          list.map((curve) =>
+            curve.id === activeIdRef.current
+              ? { ...curve, mode: current.mode, data }
+              : curve
+          )
+        );
+      }
+      setActiveId(entry.id);
+      setState(clone(entry.state));
+      setCurves((list) =>
+        list.map((curve) =>
+          curve.id === entry.id
+            ? {
+                ...curve,
+                mode: entry.state.mode,
+                data: clone(curveDataFromState(entry.state)),
+              }
+            : curve
+        )
+      );
+      lastSentRef.current = null;
+      return true;
+    },
+    [flushPendingUpdate]
+  );
+
+  const undo = useCallback(() => {
+    const history = historyRef.current;
+    const entry = history.undo.pop();
+    if (!entry) return;
+    const current =
+      activeIdRef.current == null
+        ? null
+        : { id: activeIdRef.current, state: clone(stateRef.current) };
+    if (!applyHistoryEntry(entry)) {
+      history.undo.push(entry);
+      return;
+    }
+    if (current) {
+      history.redo.push(current);
+      if (history.redo.length > 100) history.redo.shift();
+    }
+  }, [applyHistoryEntry]);
+
+  const redo = useCallback(() => {
+    const history = historyRef.current;
+    const entry = history.redo.pop();
+    if (!entry) return;
+    const current =
+      activeIdRef.current == null
+        ? null
+        : { id: activeIdRef.current, state: clone(stateRef.current) };
+    if (!applyHistoryEntry(entry)) {
+      history.redo.push(entry);
+      return;
+    }
+    if (current) {
+      history.undo.push(current);
+      if (history.undo.length > 100) history.undo.shift();
+    }
+  }, [applyHistoryEntry]);
+
   useEffect(() => {
     writeJson("hl_ezing.react.settings", settings);
   }, [settings]);
@@ -1590,19 +1872,33 @@ function App() {
 
   const selectCurve = useCallback((id) => {
     if (id === activeIdRef.current) return;
+    flushPendingUpdate();
     const curve = curvesRef.current.find((entry) => entry.id === id);
     if (!curve) return;
 
     // 編集中のIDは一覧側のデータを遅延更新しているため、切り替え前に同期する。
     if (activeIdRef.current != null) {
       const current = stateRef.current;
+      const data = clone(curveDataFromState(current));
+      const payload = JSON.stringify({ mode: current.mode, data });
+      // 80ms のデバウンス待ちで切り替え時に編集が失われないよう、
+      // IDを切り替える直前に保留中の内容を即時送信する。
+      if (lastSentRef.current !== payload) {
+        lastSentRef.current = payload;
+        post({
+          cmd: "update_curve",
+          id: activeIdRef.current,
+          mode: current.mode,
+          data,
+        });
+      }
       setCurves((list) =>
         list.map((entry) =>
           entry.id === activeIdRef.current
             ? {
                 ...entry,
                 mode: current.mode,
-                data: clone(curveDataFromState(current)),
+                data,
               }
             : entry
         )
@@ -1612,7 +1908,7 @@ function App() {
     setActiveId(id);
     setState((current) => stateWithCurve(current, curve));
     lastSentRef.current = null;
-  }, []);
+  }, [flushPendingUpdate, post]);
 
   const selectOrCreateId = useCallback(
     (id) => {
@@ -1645,18 +1941,25 @@ function App() {
         return;
       }
       const key = CURVE_DATA_KEY[mode] || CURVE_DATA_KEY.bezier;
+      recordHistory(stateRef.current);
       setState((current) => ({
         ...current,
         mode: key === CURVE_DATA_KEY.bezier ? "bezier" : mode,
         [key]: clone(data),
       }));
     },
-    [notify]
+    [notify, recordHistory]
   );
 
   const handleEvent = useCallback(
     (event) => {
       if (!event || !event.event) return;
+
+      if (event.event === "object_changed") {
+        setTrackPicker(null);
+        post({ cmd: "get_segments" });
+        return;
+      }
 
       if (event.event === "segments_dirty") {
         // AviUtl2 側でシークバーや区間が動いたときだけ届く。
@@ -1728,16 +2031,28 @@ function App() {
       if (event.event === "curve_updated") {
         // 編集中IDの更新は毎フレーム近く届くため、ID一覧の再描画を避ける。
         // 切り替え時に selectCurve() 側で最新データを同期する。
-        if (
-          event.ok &&
-          event.curve &&
-          event.curve.id !== activeIdRef.current
-        ) {
-          setCurves((list) =>
-            list.map((entry) =>
-              entry.id === event.curve.id ? event.curve : entry
-            )
-          );
+        if (event.ok && event.curve) {
+          if (event.curve.id === activeIdRef.current) {
+            // Rust 側で端点Yのclampや点数制限が行われた場合、
+            // プレビューと適用結果がずれないようUIにも反映する。
+            const current = stateRef.current;
+            const localData = curveDataFromState(current);
+            if (
+              event.curve.mode !== current.mode ||
+              JSON.stringify(event.curve.data) !== JSON.stringify(localData)
+            ) {
+              setState((currentState) =>
+                stateWithCurve(currentState, event.curve)
+              );
+              lastSentRef.current = null;
+            }
+          } else {
+            setCurves((list) =>
+              list.map((entry) =>
+                entry.id === event.curve.id ? event.curve : entry
+              )
+            );
+          }
         }
         return;
       }
@@ -1750,7 +2065,10 @@ function App() {
         const remaining = curvesRef.current.filter(
           (curve) => curve.id !== event.id
         );
-        setCurves(remaining);
+        const history = historyRef.current;
+        history.undo = history.undo.filter((entry) => entry.id !== event.id);
+        history.redo = history.redo.filter((entry) => entry.id !== event.id);
+            setCurves(remaining);
         if (activeIdRef.current === event.id) {
           const next = remaining[0];
           if (next) {
@@ -1824,7 +2142,14 @@ function App() {
 
       if (event.event === "projectLoaded") {
         bootstrappedRef.current = false;
-        lastSentRef.current = null;
+        if (pendingUpdateRef.current) {
+          clearTimeout(pendingUpdateRef.current.timer);
+          pendingUpdateRef.current = null;
+        }
+        historyRef.current = { undo: [], redo: [] };
+            lastSentRef.current = null;
+        setTrackPicker(null);
+        setSegments({ frames: [], focus: null, layerFrame: null });
         setCurves([]);
         setActiveId(null);
         post({ cmd: "get_curves" });
@@ -1850,16 +2175,24 @@ function App() {
     const data = curveDataFromState(state);
     const payload = JSON.stringify({ mode: state.mode, data });
     if (lastSentRef.current === payload) return;
+    const message = {
+      cmd: "update_curve",
+      id: activeId,
+      mode: state.mode,
+      data: clone(data),
+    };
     const timer = setTimeout(() => {
+      pendingUpdateRef.current = null;
       lastSentRef.current = payload;
-      post({
-        cmd: "update_curve",
-        id: activeId,
-        mode: state.mode,
-        data: clone(data),
-      });
+      post(message);
     }, 80);
-    return () => clearTimeout(timer);
+    pendingUpdateRef.current = { timer, payload, message };
+    return () => {
+      if (pendingUpdateRef.current?.timer === timer) {
+        clearTimeout(timer);
+        pendingUpdateRef.current = null;
+      }
+    };
   }, [
     activeId,
     state.mode,
@@ -1868,6 +2201,41 @@ function App() {
     state.bounceData,
     post,
   ]);
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (showSettings || showSavePreset) return;
+
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !isEditableTarget(e.target)) {
+        const key = e.key.toLowerCase();
+        if (key === "z" && !e.shiftKey) {
+          e.preventDefault();
+          undo();
+          return;
+        }
+        if (key === "y" || (key === "z" && e.shiftKey)) {
+          e.preventDefault();
+          redo();
+          return;
+        }
+      }
+
+      if (
+        e.code === "Space" &&
+        !e.repeat &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.metaKey &&
+        !e.shiftKey &&
+        isSpaceShortcutTarget(e.target)
+      ) {
+        e.preventDefault();
+        post({ cmd: "host_space" });
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [undo, redo, post, showSettings, showSavePreset]);
 
   const handleResizeMove = useCallback(
     (e) => {
@@ -1936,7 +2304,11 @@ function App() {
     return () => window.removeEventListener("mousedown", close);
   }, [trackPicker]);
 
-  const setMode = (mode) => setState((current) => ({ ...current, mode }));
+  const setMode = (mode) => {
+    if (mode === stateRef.current.mode) return;
+    recordHistory(stateRef.current);
+    setState((current) => ({ ...current, mode }));
+  };
 
   const clearTracksRequest = useCallback(() => {
     if (!tracksRequestRef.current) return;
@@ -2079,6 +2451,10 @@ function App() {
       if (segmentsTimer.current) {
         clearTimeout(segmentsTimer.current);
       }
+      if (pendingUpdateRef.current) {
+        clearTimeout(pendingUpdateRef.current.timer);
+        pendingUpdateRef.current = null;
+      }
     },
     []
   );
@@ -2097,15 +2473,18 @@ function App() {
     ]);
   };
 
-  const reset = () =>
+  const reset = () => {
+    recordHistory(stateRef.current);
     setState((current) => ({
       ...current,
       bezierData: defaultBezier(),
       elasticData: clone(DEFAULT_ELASTIC),
       bounceData: clone(DEFAULT_BOUNCE),
     }));
+  };
 
   const reverse = () => {
+    recordHistory(stateRef.current);
     if (state.mode === "elastic") {
       setState((current) => ({
         ...current,
@@ -2161,6 +2540,7 @@ function App() {
   const loc = settings.presetPanelLocation || "right";
   const isVertical = loc === "top" || loc === "bottom";
   const isBefore = loc === "left" || loc === "top";
+  const showPresetPanel = settings.showPresetPanel !== false;
 
   const presetStyle = isVertical
     ? { height: `${panelSize}px`, flexBasis: `${panelSize}px` }
@@ -2180,11 +2560,19 @@ function App() {
     <div
       className={`app ${isVertical ? "vertical" : "horizontal"} compact location-${loc}`}
     >
-      {isBefore && presetsComponent}
+      {showPresetPanel && isBefore && presetsComponent}
       {isBefore && (
-        <div
-          className={`resizer ${isVertical ? "horizontal" : "vertical"}`}
-          onMouseDown={() => {
+        <PresetDivider
+          vertical={isVertical}
+          before
+          visible={showPresetPanel}
+          onToggle={() =>
+            setSettings((current) => ({
+              ...current,
+              showPresetPanel: !current.showPresetPanel,
+            }))
+          }
+          onResizeStart={() => {
             resizing.current = true;
           }}
         />
@@ -2210,7 +2598,12 @@ function App() {
             <MdSettings />
           </button>
         </header>
-        <Graph state={state} setState={setState} settings={settings} />
+        <Graph
+          state={state}
+          setState={setState}
+          settings={settings}
+          onCommitEdit={commitHistory}
+        />
         <SegmentBar
           segments={segments}
           onSelect={(index) => {
@@ -2288,14 +2681,22 @@ function App() {
         </footer>
       </main>
       {!isBefore && (
-        <div
-          className={`resizer ${isVertical ? "horizontal" : "vertical"}`}
-          onMouseDown={() => {
+        <PresetDivider
+          vertical={isVertical}
+          before={false}
+          visible={showPresetPanel}
+          onToggle={() =>
+            setSettings((current) => ({
+              ...current,
+              showPresetPanel: !current.showPresetPanel,
+            }))
+          }
+          onResizeStart={() => {
             resizing.current = true;
           }}
         />
       )}
-      {!isBefore && presetsComponent}
+      {showPresetPanel && !isBefore && presetsComponent}
       {notice && (
         <div className={`status-toast ${notice.kind}`}>{notice.text}</div>
       )}

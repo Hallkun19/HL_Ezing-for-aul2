@@ -51,8 +51,8 @@ pub struct TrackValue {
 impl TrackValue {
     /// 区間ごとのカーブIDリストを返す。
     ///
-    /// 新形式: `[0, id0, id1, ..., nonce]`
-    /// 旧形式: `[id, nonce]`
+    /// 旧ベータ形式: `[0, id0, id1, ..., nonce]`
+    /// v1.1 形式: `[id, nonce]`
     ///
     /// 旧形式や未適用のトラックでは、足りない区間を `default_id` または
     /// 直前のIDで埋める。区間数は呼び出し側が値の点数から決める。
@@ -69,7 +69,8 @@ impl TrackValue {
         {
             let params = &movement.parameters;
             if params.first().copied() == Some(0.0) && params.len() >= 3 {
-                ids = params[2..]
+                // 旧ベータ writer は [0, id0, id1, ..., nonce] の順で保存していた。
+                ids = params[1..params.len() - 1]
                     .iter()
                     .map(|value| *value as u64)
                     .filter(|id| *id > 0)
@@ -204,7 +205,7 @@ impl TrackValue {
             0 => self.values = vec![start_value, end_value],
             1 => {
                 let value = self.values[0];
-                self.values = vec![value, value];
+                self.values = vec![value, end_value];
             }
             _ => {}
         }
@@ -391,10 +392,10 @@ mod tests {
     }
 
     #[test]
-    fn segment_ids_from_new_list_format() {
+    fn segment_ids_from_legacy_beta_list_format() {
         let track = TrackValue::parse(
             "0.00,50.00,100.00,HL_Ezing,0",
-            Some(&info("HL_Ezing", vec![0.0, 17.0, 3.0, 4.0], false)),
+            Some(&info("HL_Ezing", vec![0.0, 3.0, 4.0, 17.0], false)),
         )
         .unwrap();
         assert_eq!(track.segment_curve_ids("HL_Ezing", 2, 9), vec![3, 4]);
@@ -414,8 +415,9 @@ mod tests {
     #[test]
     fn ensure_two_points_duplicates_single_value() {
         let mut track = TrackValue::parse("42.00", None).unwrap();
-        track.ensure_two_points(42.0, 42.0);
+        track.ensure_two_points(42.0, 50.0);
+        assert_eq!(track.values, vec![42.0, 50.0]);
         track.set_movement("HL_Ezing", vec![1.0, 2.0]);
-        assert_eq!(track.to_string(), "42.00,42.00,HL_Ezing,0|1,2");
+        assert_eq!(track.to_string(), "42.00,50.00,HL_Ezing,0|1,2");
     }
 }

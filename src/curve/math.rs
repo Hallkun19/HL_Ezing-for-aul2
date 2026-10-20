@@ -297,6 +297,7 @@ mod tests {
                     out_type: "bezier".into(),
                     out_elastic: None,
                     out_bounce: None,
+                    handles_linked: None,
                 },
                 super::BezierPoint {
                     anchor: [1.0, 1.0],
@@ -305,6 +306,7 @@ mod tests {
                     out_type: "bezier".into(),
                     out_elastic: None,
                     out_bounce: None,
+                    handles_linked: None,
                 },
             ],
         };
@@ -344,6 +346,7 @@ mod tests {
                     out_type: "bezier".into(),
                     out_elastic: None,
                     out_bounce: None,
+                    handles_linked: None,
                 },
                 BezierPoint {
                     anchor: [1.0, 0.9],
@@ -352,6 +355,7 @@ mod tests {
                     out_type: "bezier".into(),
                     out_elastic: None,
                     out_bounce: None,
+                    handles_linked: None,
                 },
             ],
         };
@@ -375,6 +379,7 @@ mod tests {
                     out_type: "bezier".into(),
                     out_elastic: None,
                     out_bounce: None,
+                    handles_linked: None,
                 },
                 BezierPoint {
                     anchor: [1.0, 1.0],
@@ -383,6 +388,7 @@ mod tests {
                     out_type: "bezier".into(),
                     out_elastic: None,
                     out_bounce: None,
+                    handles_linked: None,
                 },
             ],
         };

@@ -24,7 +24,7 @@ use serde_json::json;
 use windows_sys::Win32::Foundation::{HWND, POINT};
 use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, CombineRgn, CreateRectRgn, CreateSolidBrush, DeleteObject, RGN_DIFF,
-    ScreenToClient, SetWindowRgn,
+    SetWindowRgn,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -34,14 +34,13 @@ use windows_sys::Win32::System::Memory::{
     PAGE_WRITECOPY, VirtualQuery,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId};
-use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GA_ROOT, GetAncestor, GetCursorPos,
-    GetWindowThreadProcessId, HWND_TOPMOST, LWA_ALPHA, RegisterClassExW, SW_HIDE, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowPos, ShowWindow, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
-    WindowFromPoint,
+    GetWindowThreadProcessId, HWND_TOPMOST, IsChild, LWA_ALPHA, RegisterClassExW, SW_HIDE,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowPos, ShowWindow,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP, WindowFromPoint,
 };
 
 /// AviUtl2 のバージョン。`AviUtl2Info::version.0` をそのまま保持する。
@@ -51,7 +50,13 @@ static VERSION: AtomicU32 = AtomicU32::new(0);
 static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VTABLES: OnceLock<Option<Vtables>> = OnceLock::new();
 
-type TargetCache = Mutex<Option<(Instant, Vec<TrackBarTarget>)>>;
+struct TargetCacheEntry {
+    stored_at: Instant,
+    main_window: usize,
+    targets: Vec<TrackBarTarget>,
+}
+
+type TargetCache = Mutex<Option<TargetCacheEntry>>;
 static TARGET_CACHE: OnceLock<TargetCache> = OnceLock::new();
 
 const CACHE_MAX_AGE: Duration = Duration::from_secs(8);
@@ -102,9 +107,9 @@ const LAYOUT_2_1_X: LayoutProfile = LayoutProfile {
 };
 
 fn layout_profile(version: u32) -> Option<&'static LayoutProfile> {
-    // 2.1.3a から 2.1.14 までは同じレイアウトであることを確認済み。
-    // 将来レイアウトが変わったら、ここにバージョン範囲を追加する。
-    if version >= 2_010_300 {
+    // 動作確認済みの範囲だけを許可する。未知のバージョンでは
+    // 誤ったレイアウトで別の行を指すより、D&D を無効化する。
+    if (2_010_300..=2_011_499).contains(&version) {
         Some(&LAYOUT_2_1_X)
     } else {
         None
@@ -241,8 +246,14 @@ impl HighlightOverlay {
                 DeleteObject(inner as _);
             }
         }
+        let region_set = unsafe { SetWindowRgn(self.hwnd, outer, 1) };
+        if region_set == 0 {
+            unsafe {
+                DeleteObject(outer as _);
+            }
+            return;
+        }
         unsafe {
-            SetWindowRgn(self.hwnd, outer, 1);
             SetWindowPos(
                 self.hwnd,
                 HWND_TOPMOST,
@@ -303,7 +314,8 @@ fn version() -> u32 {
 
 /// この AviUtl2 でドラッグ適用を試せるか。
 pub fn is_supported() -> bool {
-    layout_profile(version()).is_some() && vtables().is_some()
+    layout_profile(version()).is_some()
+        && vtables().is_some_and(|vtables| vtables.effect_setting.is_some())
 }
 
 fn vtables() -> Option<&'static Vtables> {
@@ -318,6 +330,7 @@ fn read_bytes(address: usize, len: usize) -> Option<Vec<u8>> {
     if len == 0 {
         return Some(Vec::new());
     }
+    address.checked_add(len)?;
     let mut buffer = vec![0u8; len];
     let mut read = 0usize;
     let ok = unsafe {
@@ -381,15 +394,16 @@ fn read_std_wstring(address: usize, offset: usize) -> Option<String> {
     //   +0x00 バッファ (SSO時はここに文字列そのもの)
     //   +0x10 長さ
     //   +0x18 容量
-    let length = read_usize(address + offset + 0x10)?;
-    let capacity = read_usize(address + offset + 0x18)?;
+    let base = address.checked_add(offset)?;
+    let length = read_usize(base.checked_add(0x10)?)?;
+    let capacity = read_usize(base.checked_add(0x18)?)?;
     if length == 0 || length > 512 {
         return None;
     }
     let buffer = if capacity >= 8 {
-        read_usize(address + offset)?
+        read_usize(base)?
     } else {
-        address + offset
+        base
     };
     let mut bytes = vec![0u8; length * 2];
     let mut read = 0usize;
@@ -444,7 +458,11 @@ fn module_info() -> Option<ModuleInfo> {
         let raw_size = read_u32(header + 16)? as usize;
         let characteristics = read_u32(header + 36)?;
         let start = base.checked_add(virtual_address)?;
-        let len = virtual_size.max(raw_size);
+        // 破損 PE の巨大なセクション長で Vec を確保しないよう上限を設ける。
+        let len = virtual_size
+            .max(raw_size)
+            .min(image_size)
+            .min(64 * 1024 * 1024);
         if len == 0 {
             continue;
         }
@@ -686,22 +704,33 @@ fn readable_private_regions() -> Vec<(usize, usize)> {
     regions
 }
 
+fn find_setting_base(context: usize, setting_vtable: usize) -> Option<usize> {
+    // 2.1.14 では +0xE8 は EffectSetting 本体の先頭ではなく、
+    // その内部コントロールを指す。vtable を後方走査して本体を探す。
+    for offset in (0..=0x400).step_by(8) {
+        let address = context.checked_sub(offset)?;
+        if address < 0x10000 {
+            break;
+        }
+        if read_usize(address) == Some(setting_vtable) {
+            return Some(address);
+        }
+    }
+    None
+}
+
 fn read_effect_name(target: &TrackBarTarget, layout: &LayoutProfile) -> Option<String> {
     if target.context < 0x10000 {
         return None;
     }
-    let setting_vtable = vtables()?;
-    if let Some(setting) = setting_vtable.effect_setting
-        && target.context_vtable != setting
-        && setting_vtable.effect_setting_select != Some(target.context_vtable)
-    {
-        return None;
-    }
-    let effect_base = read_usize(target.context + layout.setting_effect_base)?;
+    let vtables = vtables()?;
+    let setting_vtable = vtables.effect_setting?;
+    let setting_base = find_setting_base(target.context, setting_vtable)?;
+    let effect_base = read_usize(setting_base.checked_add(layout.setting_effect_base)?)?;
     if effect_base < 0x10000 {
         return None;
     }
-    let name = read_usize(effect_base + layout.effect_base_name)?;
+    let name = read_usize(effect_base.checked_add(layout.effect_base_name)?)?;
     read_wide_string(name, 96)
 }
 
@@ -713,7 +742,10 @@ fn validate_candidate(
     if !address.is_multiple_of(8) {
         return Vec::new();
     }
-    let Some(item) = read_usize(address + layout.item_control_item) else {
+    let Some(item_address) = address.checked_add(layout.item_control_item) else {
+        return Vec::new();
+    };
+    let Some(item) = read_usize(item_address) else {
         return Vec::new();
     };
     if item < 0x10000 {
@@ -722,7 +754,10 @@ fn validate_candidate(
     let Some(item_name) = read_std_wstring(item, layout.item_name_wstring) else {
         return Vec::new();
     };
-    let context = read_usize(address + layout.item_control_context).unwrap_or(0);
+    let context = address
+        .checked_add(layout.item_control_context)
+        .and_then(read_usize)
+        .unwrap_or(0);
     let context_vtable = if context >= 0x10000 {
         read_usize(context).unwrap_or(0)
     } else {
@@ -755,17 +790,22 @@ fn validate_candidate(
             continue;
         }
         let slider_offset = scan_start + offset;
-        let slider = address + slider_offset;
-        let Some(x) = read_i32(slider + layout.slider_rect) else {
+        let Some(slider) = address.checked_add(slider_offset) else {
             continue;
         };
-        let Some(y) = read_i32(slider + layout.slider_rect + 4) else {
+        let Some(rect_addr) = slider.checked_add(layout.slider_rect) else {
             continue;
         };
-        let Some(w) = read_i32(slider + layout.slider_rect + 8) else {
+        let Some(x) = read_i32(rect_addr) else {
             continue;
         };
-        let Some(h) = read_i32(slider + layout.slider_rect + 12) else {
+        let Some(y) = read_i32(rect_addr + 4) else {
+            continue;
+        };
+        let Some(w) = read_i32(rect_addr + 8) else {
+            continue;
+        };
+        let Some(h) = read_i32(rect_addr + 12) else {
             continue;
         };
         let rect = RectI { x, y, w, h };
@@ -891,6 +931,12 @@ fn left_button_down() -> bool {
     (unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } as u16 & 0x8000) != 0
 }
 
+fn main_window() -> Option<HWND> {
+    let host = crate::window::host_hwnd()?;
+    let root = unsafe { GetAncestor(host, GA_ROOT) };
+    (!root.is_null()).then_some(root)
+}
+
 fn root_window_at(point: POINT) -> Option<HWND> {
     let hwnd = unsafe { WindowFromPoint(point) };
     if hwnd.is_null() {
@@ -905,60 +951,66 @@ fn root_window_at(point: POINT) -> Option<HWND> {
     (process_id == unsafe { GetCurrentProcessId() }).then_some(root)
 }
 
-fn hit_candidates(root: HWND, screen: POINT) -> Vec<(i32, i32, &'static str)> {
-    let mut client = screen;
-    unsafe { ScreenToClient(root, &mut client) };
-    let dpi = unsafe { GetDpiForWindow(root) };
-    let scale = if dpi == 0 { 1.0 } else { f64::from(dpi) / 96.0 };
-    let mut points = vec![(client.x, client.y, "client")];
-    if (scale - 1.0).abs() > 0.001 {
-        points.push((
-            (f64::from(client.x) / scale).round() as i32,
-            (f64::from(client.y) / scale).round() as i32,
-            "client/dpi",
-        ));
-        points.push((
-            (f64::from(client.x) * scale).round() as i32,
-            (f64::from(client.y) * scale).round() as i32,
-            "client*dpi",
-        ));
+fn is_over_plugin_window(point: POINT) -> bool {
+    let Some(host) = crate::window::host_hwnd() else {
+        return false;
+    };
+    let hwnd = unsafe { WindowFromPoint(point) };
+    if hwnd.is_null() {
+        return false;
     }
-    // 念のため、矩形がスクリーン座標で入っている場合にも対応する。
-    points.push((screen.x, screen.y, "screen"));
-    points
+    hwnd == host || unsafe { IsChild(host, hwnd) != 0 }
 }
 
-fn cache() -> &'static Mutex<Option<(Instant, Vec<TrackBarTarget>)>> {
+fn cache() -> &'static TargetCache {
     TARGET_CACHE.get_or_init(|| Mutex::new(None))
 }
 
-fn cached_targets() -> Option<Vec<TrackBarTarget>> {
+fn cached_targets(main: HWND) -> Option<Vec<TrackBarTarget>> {
     let guard = cache().lock().ok()?;
-    let (stored_at, targets) = guard.as_ref()?;
-    (stored_at.elapsed() < CACHE_MAX_AGE).then(|| targets.clone())
+    let entry = guard.as_ref()?;
+    (entry.stored_at.elapsed() < CACHE_MAX_AGE && entry.main_window == main as usize)
+        .then(|| entry.targets.clone())
 }
 
-fn store_targets(targets: &[TrackBarTarget]) {
+fn store_targets(main: HWND, targets: &[TrackBarTarget]) {
+    // 空の結果をキャッシュすると、設定画面を開いた後の初回ドラッグが
+    // 8秒間失敗するため保存しない。
+    if targets.is_empty() {
+        return;
+    }
     if let Ok(mut guard) = cache().lock() {
-        *guard = Some((Instant::now(), targets.to_vec()));
+        *guard = Some(TargetCacheEntry {
+            stored_at: Instant::now(),
+            main_window: main as usize,
+            targets: targets.to_vec(),
+        });
+    }
+}
+
+pub fn invalidate_cache() {
+    if let Ok(mut guard) = cache().lock() {
+        *guard = None;
     }
 }
 
 static SCAN_LOCK: Mutex<()> = Mutex::new(());
 
 fn scan_and_store() -> Result<Vec<TrackBarTarget>, String> {
+    let main =
+        main_window().ok_or_else(|| "AviUtl2 のメインウィンドウを特定できません。".to_string())?;
     let _lock = SCAN_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    if let Some(targets) = cached_targets() {
+    if let Some(targets) = cached_targets(main) {
         return Ok(targets);
     }
     let targets = scan_targets()?;
-    store_targets(&targets);
+    store_targets(main, &targets);
     Ok(targets)
 }
 
 /// ドラッグ開始前にバックグラウンドでスキャンを温める。
 pub fn warm_cache() {
-    if cached_targets().is_some() {
+    if main_window().and_then(cached_targets).is_some() {
         return;
     }
     std::thread::spawn(|| {
@@ -971,18 +1023,21 @@ fn hit_test_targets(
     root: HWND,
     screen: POINT,
 ) -> Option<(usize, HWND)> {
-    let candidates = hit_candidates(root, screen);
+    // 対象矩形は AviUtl2 メインウィンドウのクライアント座標なので、
+    // ドロップ先のルートウィンドウからスクリーン座標へ変換する。
+    // これによりプラグインウィンドウが分離（フローティング）していても、
+    // メインウィンドウ上のトラックバーを正しく判定できる。
     let any_visible = targets.iter().any(|target| target.visible);
     let mut best: Option<(i64, usize)> = None;
     for (index, target) in targets.iter().enumerate() {
         if any_visible && !target.visible {
             continue;
         }
-        if candidates
-            .iter()
-            .any(|(x, y, _)| target.rect.contains(*x, *y))
-        {
-            let area = target.rect.area();
+        let Some(rect) = screen_rect(root, target.rect) else {
+            continue;
+        };
+        if rect.contains(screen.x, screen.y) {
+            let area = rect.area();
             if best.as_ref().is_none_or(|(best_area, _)| area < *best_area) {
                 best = Some((area, index));
             }
@@ -991,14 +1046,14 @@ fn hit_test_targets(
     best.map(|(_, index)| (index, root))
 }
 
-fn screen_rect(root: HWND, rect: RectI) -> Option<(i32, i32, i32, i32)> {
+fn screen_rect(root: HWND, rect: RectI) -> Option<RectI> {
     let mut origin = POINT { x: 0, y: 0 };
-    (unsafe { ClientToScreen(root, &mut origin) } != 0).then_some((
-        origin.x + rect.x,
-        origin.y + rect.y,
-        rect.w,
-        rect.h,
-    ))
+    (unsafe { ClientToScreen(root, &mut origin) } != 0).then_some(RectI {
+        x: origin.x.checked_add(rect.x)?,
+        y: origin.y.checked_add(rect.y)?,
+        w: rect.w,
+        h: rect.h,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,50 +1068,95 @@ fn resolve_descriptor(
     tracks: &[crate::curve::apply::TrackEntry],
     target: &TrackBarTarget,
 ) -> Option<crate::curve::apply::TrackEntry> {
-    let mut candidates = tracks
+    let item_candidates = tracks
         .iter()
         .filter(|track| item_matches(&track.item, &target.item_name))
-        .filter(|track| {
-            target
-                .effect_name
-                .as_ref()
-                .is_none_or(|name| &track.effect == name)
-        })
         .cloned()
         .collect::<Vec<_>>();
-    if candidates.is_empty() && target.effect_name.is_some() {
-        // エフェクト名だけが取れている場合のフォールバック。
-        candidates = tracks
+
+    let mut candidates = if let Some(effect_name) = target.effect_name.as_ref() {
+        item_candidates
             .iter()
-            .filter(|track| item_matches(&track.item, &target.item_name))
+            .filter(|track| &track.effect == effect_name)
             .cloned()
-            .collect();
-    }
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
     if candidates.is_empty() {
+        // エフェクト名が取れない場合だけ、item 名が一意なときに限り許可する。
+        // 同名 item が複数ある状況で適当なエフェクトへ適用しない。
+        if item_candidates.len() == 1 {
+            return item_candidates.into_iter().next();
+        }
         return None;
     }
     if candidates.len() == 1 {
         return candidates.pop();
     }
-    let rank = target.effect_rank.min(candidates.len() - 1);
-    candidates.into_iter().nth(rank)
+    if target.effect_rank >= candidates.len() {
+        return None;
+    }
+    candidates.into_iter().nth(target.effect_rank)
 }
 
 pub fn apply_target(target: &TrackBarTarget, curve_id: u64) -> Result<(), String> {
+    if !crate::ipc::EDIT_HANDLE.is_ready() {
+        return Err("編集セクションの初期化が完了していません。".into());
+    }
     let result = crate::ipc::EDIT_HANDLE.call_edit_section(|edit| -> Result<(), String> {
-        let object = crate::curve::apply::focused_or_first_object(edit)?
-            .ok_or_else(|| "適用対象のオブジェクトが見つかりません。".to_string())?;
-        let tracks = crate::curve::apply::collect_tracks(edit, object)?;
-        let descriptor = resolve_descriptor(&tracks, target)
-            .ok_or_else(|| "ドロップ位置のトラックバーを特定できませんでした。".to_string())?;
-        crate::curve::apply::apply_to_item_on_object(
-            edit,
-            object,
-            &descriptor.effect,
-            descriptor.effect_index,
-            &descriptor.item,
-            curve_id,
-        )
+        let mut objects = Vec::new();
+        if let Ok(Some(object)) = edit.get_focused_object() {
+            objects.push(object);
+        }
+        if let Ok(selected) = edit.get_selected_objects() {
+            objects.extend(selected);
+        }
+        if objects.is_empty()
+            && let Some(object) = crate::curve::apply::focused_or_first_object(edit)?
+        {
+            objects.push(object);
+        }
+        if objects.is_empty() {
+            return Err("適用対象のオブジェクトが見つかりません。".to_string());
+        }
+
+        for object in objects {
+            let Ok(tracks) = crate::curve::apply::collect_tracks(edit, object) else {
+                continue;
+            };
+            tracing::info!(
+                "HL_Ezing drag resolve: effect={:?}, item={}, object={:?}, item candidates={:?}, effects={:?}",
+                target.effect_name,
+                target.item_name,
+                edit.get_object_layer_frame(object).ok(),
+                tracks
+                    .iter()
+                    .filter(|track| item_matches(&track.item, &target.item_name))
+                    .map(|track| format!("{}/{}#{}", track.effect, track.item, track.effect_index))
+                    .take(20)
+                    .collect::<Vec<_>>(),
+                {
+                    let mut names =
+                        tracks.iter().map(|track| track.effect.clone()).collect::<Vec<_>>();
+                    names.sort();
+                    names.dedup();
+                    names.into_iter().take(30).collect::<Vec<_>>()
+                }
+            );
+            if let Some(descriptor) = resolve_descriptor(&tracks, target) {
+                return crate::curve::apply::apply_to_item_on_object(
+                    edit,
+                    object,
+                    &descriptor.effect,
+                    descriptor.effect_index,
+                    &descriptor.item,
+                    curve_id,
+                );
+            }
+        }
+        Err("ドロップ位置のトラックバーを特定できませんでした。".to_string())
     });
     match result {
         Ok(inner) => inner,
@@ -1079,8 +1179,10 @@ pub fn start_drag(curve_id: u64) -> bool {
     warm_cache();
     std::thread::spawn(move || {
         let _guard = DragGuard;
-        let result = monitor_drag(curve_id);
+        let result = std::panic::catch_unwind(|| monitor_drag(curve_id))
+            .unwrap_or_else(|_| Err("ドラッグ処理中にエラーが発生しました。".to_string()));
         if let Err(message) = result {
+            tracing::warn!("HL_Ezing drag cancelled: {message}");
             crate::ipc::send_event(json!({
                 "event": "drag_cancelled",
                 "ok": false,
@@ -1103,6 +1205,7 @@ fn monitor_drag(curve_id: u64) -> Result<(), String> {
     if !crate::curve::registry::contains(curve_id) {
         return Err("指定されたカーブIDが存在しません。".into());
     }
+    let main = main_window().ok_or_else(|| "AviUtl2 のウィンドウを特定できません。".to_string())?;
     let started = Instant::now();
     // フロントエンドは数ピクセル動かしてから start_drag を送る。通常は
     // すでに左ボタンが押されているが、念のため短時間だけ待つ。
@@ -1113,25 +1216,42 @@ fn monitor_drag(curve_id: u64) -> Result<(), String> {
         return Err("ドラッグが開始されませんでした。".into());
     }
 
-    // スキャンは1回だけ行い、ドラッグ中はキャッシュした矩形で判定する。
-    let targets = scan_and_store()?;
-    let overlay = HighlightOverlay::new();
+    let mut point = POINT { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut point) } == 0 {
+        return Err("カーソル位置を取得できませんでした。".into());
+    }
+    let mut release_point = point;
 
-    while started.elapsed() < Duration::from_secs(60) && left_button_down() {
-        let mut point = POINT { x: 0, y: 0 };
-        if unsafe { GetCursorPos(&mut point) } != 0
-            && let Some(root) = root_window_at(point)
-            && let Some(hit) = hit_test_targets(&targets, root, point)
-        {
-            if let Some(overlay) = overlay.as_ref()
-                && let Some((x, y, width, height)) = screen_rect(hit.1, targets[hit.0].rect)
-            {
-                overlay.show(x, y, width, height);
-            }
-        } else if let Some(overlay) = overlay.as_ref() {
-            overlay.hide();
+    // スキャンは prepare_drag で開始済み。ここではスキャンを待たずに
+    // マウス位置を記録し、ボタンが離れた瞬間の位置を保持する。
+    let overlay = HighlightOverlay::new();
+    let mut targets = cached_targets(main);
+    while started.elapsed() < Duration::from_secs(60) {
+        if unsafe { GetCursorPos(&mut point) } == 0 {
+            break;
         }
-        std::thread::sleep(Duration::from_millis(18));
+        if !left_button_down() {
+            break;
+        }
+        release_point = point;
+        if targets.is_none() {
+            targets = cached_targets(main);
+        }
+        if let Some(targets) = targets.as_ref() {
+            if !is_over_plugin_window(point)
+                && let Some(root) = root_window_at(point)
+                && let Some(hit) = hit_test_targets(targets, root, point)
+            {
+                if let Some(overlay) = overlay.as_ref()
+                    && let Some(rect) = screen_rect(root, targets[hit.0].rect)
+                {
+                    overlay.show(rect.x, rect.y, rect.w, rect.h);
+                }
+            } else if let Some(overlay) = overlay.as_ref() {
+                overlay.hide();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
     if left_button_down() {
         return Err("ドラッグがタイムアウトしました。".into());
@@ -1140,13 +1260,28 @@ fn monitor_drag(curve_id: u64) -> Result<(), String> {
         overlay.hide();
     }
 
-    let mut point = POINT { x: 0, y: 0 };
-    if unsafe { GetCursorPos(&mut point) } == 0 {
-        return Err("カーソル位置を取得できませんでした。".into());
+    let targets = match targets.or_else(|| cached_targets(main)) {
+        Some(targets) => targets,
+        None => scan_and_store()?,
+    };
+    if is_over_plugin_window(release_point) {
+        return Err("HL_Ezing ウィンドウ上では適用できません。".to_string());
     }
-    let hit = root_window_at(point)
-        .and_then(|root| hit_test_targets(&targets, root, point))
-        .ok_or_else(|| "カーソル下にトラックバーがありません。".to_string())?;
+    let hit = match root_window_at(release_point)
+        .and_then(|root| hit_test_targets(&targets, root, release_point))
+    {
+        Some(hit) => hit,
+        None => {
+            tracing::info!(
+                "HL_Ezing drag release miss: cursor=({}, {}), main=0x{:X}, targets={}",
+                release_point.x,
+                release_point.y,
+                main as usize,
+                targets.len()
+            );
+            return Err("カーソル下にトラックバーがありません。".to_string());
+        }
+    };
     let target = &targets[hit.0];
     apply_target(target, curve_id)?;
     crate::curve::registry::set_last_applied(curve_id);
@@ -1226,11 +1361,14 @@ pub fn debug_snapshot() -> serde_json::Value {
 }
 
 pub fn log_debug_snapshot() {
-    let snapshot = debug_snapshot();
-    match serde_json::to_string_pretty(&snapshot) {
-        Ok(text) => tracing::info!("HL_Ezing trackbar diagnostics:\n{text}"),
-        Err(error) => tracing::warn!("Failed to serialize trackbar diagnostics: {error}"),
-    }
+    // 数秒かかるメモリ走査で UI スレッドを止めないよう、ワーカーで実行する。
+    std::thread::spawn(|| {
+        let snapshot = debug_snapshot();
+        match serde_json::to_string_pretty(&snapshot) {
+            Ok(text) => tracing::info!("HL_Ezing trackbar diagnostics:\n{text}"),
+            Err(error) => tracing::warn!("Failed to serialize trackbar diagnostics: {error}"),
+        }
+    });
 }
 
 #[cfg(test)]

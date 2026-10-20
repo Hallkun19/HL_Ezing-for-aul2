@@ -62,6 +62,7 @@ button:active {
 }
 
 .app {
+  position: relative;
   display: flex;
   width: 100%;
   height: 100%;
@@ -222,6 +223,7 @@ button:active {
   width: 100%;
   height: 100%;
   cursor: crosshair;
+  outline: none;
 }
 
 /* 区間バー */
@@ -407,9 +409,11 @@ button:active {
 }
 
 .resizer {
+  position: relative;
+  z-index: 20;
   flex: 0 0 5px;
   background: #282828;
-  transition: background 0.2s;
+  transition: background 0.2s, flex-basis 0.2s;
 }
 
 .resizer:hover {
@@ -423,6 +427,67 @@ button:active {
 .resizer.horizontal {
   cursor: row-resize;
 }
+
+.panel-toggle,
+.panel-edge-toggle {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #bdbdbd;
+  background: #242424;
+  border: 1px solid #3d3d3d;
+  border-radius: 50%;
+  font-size: 15px;
+}
+
+.panel-toggle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  transform: translate(-50%, -50%);
+}
+
+.panel-edge-toggle {
+  position: absolute;
+  z-index: 30;
+}
+
+.panel-toggle:hover,
+.panel-edge-toggle:hover {
+  color: #ffffff;
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+}
+
+.panel-edge-toggle.edge-left {
+  left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.panel-edge-toggle.edge-right {
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.panel-edge-toggle.edge-top {
+  top: 46px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.panel-edge-toggle.edge-bottom {
+  bottom: 46px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+
 
 /* プリセットパネル */
 .preset-panel {
@@ -715,7 +780,18 @@ input[type="range"]::-webkit-slider-thumb:hover {
   border-radius: 4px;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
   transform: translateX(-50%);
-  animation: fadeIn 0.12s ease-out;
+  animation: toastIn 0.12s ease-out;
+}
+
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 4px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
 }
 
 .status-toast.error {

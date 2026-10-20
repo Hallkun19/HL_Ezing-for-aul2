@@ -46,4 +46,6 @@ local v = module.getcurve(curve_id, nonce or 0, t)
 if v == nil then
     return st + (ed - st) * t
 end
+
+-- The graph's start/end Y is reflected as-is. Do not normalize.
 return st + (ed - st) * v

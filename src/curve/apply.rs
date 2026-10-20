@@ -24,7 +24,7 @@ pub const LAST_APPLIED_KEY: &str = "hl_ezing_last_applied";
 pub const ASSIGNMENTS_KEY: &str = "hl_ezing_segment_assignments";
 /// 区間割り当てIDを通常のカーブIDと区別するためのオフセット。
 /// カーブIDの入力上限は 999999 なので、10億以上は割り当てIDとみなせる。
-const ASSIGNMENT_PARAM_OFFSET: u64 = 1_000_000_000;
+pub(crate) const ASSIGNMENT_PARAM_OFFSET: u64 = 1_000_000_000;
 
 /// 指定またはフォーカスされている単一のトラックバーだけにカーブを適用する。
 /// `target_effect` / `target_effect_index` / `target_item` が指定されている場合は、
@@ -79,7 +79,8 @@ pub fn apply_to_single_track(
                 continue;
             }
             // 最初に対象となった単一のトラックバーだけに適用して終了する
-            if apply_to_track_with_group(edit, object, effect, &item.name, curve_id, segment) {
+            if apply_to_track_with_group(edit, object, effect, &item.name, curve_id, segment, false)
+            {
                 return Ok(1);
             }
         }
@@ -156,7 +157,7 @@ pub fn apply_to_item_on_object(
         return Err("対象のトラックバーが見つかりません。".into());
     }
     let segment = Some(focus_segment(edit).unwrap_or(0));
-    if apply_to_track_with_group(edit, object, effect, item, curve_id, segment) {
+    if apply_to_track_with_group(edit, object, effect, item, curve_id, segment, false) {
         Ok(())
     } else {
         Err("トラックバーの移動方法を書き換えられませんでした。".into())
@@ -172,19 +173,16 @@ fn focus_segment(edit: &EditSection) -> Option<usize> {
 pub fn focused_or_first_object(
     edit: &EditSection,
 ) -> Result<Option<aviutl2::generic::ObjectHandle>, String> {
-    if let Ok(Some(object)) = edit.get_focused_object() {
-        return Ok(Some(object));
-    }
     first_object(edit)
 }
 
 fn first_object(edit: &EditSection) -> Result<Option<aviutl2::generic::ObjectHandle>, String> {
-    let mut objects = edit.get_selected_objects().map_err(|e| e.to_string())?;
-    if objects.is_empty()
-        && let Some(object) = edit.get_focused_object().map_err(|e| e.to_string())?
-    {
-        objects.push(object);
+    // オブジェクト設定を開いている場合は、そのフォーカス対象を最優先する。
+    // ピッカー・区間バー・単一適用・全適用で同じオブジェクトを見るための基準。
+    if let Ok(Some(object)) = edit.get_focused_object() {
+        return Ok(Some(object));
     }
+    let objects = edit.get_selected_objects().map_err(|e| e.to_string())?;
     Ok(objects.first().copied())
 }
 
@@ -231,6 +229,67 @@ fn track_info(edit: &EditSection, effect: EffectHandle, item: &str) -> Result<Tr
     edit.get_effect_track_info(effect, item).map_err(|_| ())
 }
 
+/// 旧ベータの区間リスト形式を、現在の割り当てID形式へ移行する。
+/// UI からオブジェクトを開いたときに呼び、旧プロジェクトでも
+/// `.tra2` が区間IDを解決できるようにする。
+pub fn migrate_legacy_tracks(
+    edit: &EditSection,
+    object: aviutl2::generic::ObjectHandle,
+) -> Result<usize, String> {
+    let effects = edit.get_effects(object).map_err(|e| e.to_string())?;
+    let mut migrated = 0usize;
+    for effect in effects {
+        let effect_name = edit.get_effect_name(effect).map_err(|e| e.to_string())?;
+        let Ok(items) = crate::ipc::EDIT_HANDLE.get_effect_items(&effect_name) else {
+            continue;
+        };
+        for item in items {
+            let Ok(info) = edit.get_effect_track_info(effect, &item.name) else {
+                continue;
+            };
+            let Ok(value) = edit.get_effect_item_value(effect, &item.name) else {
+                continue;
+            };
+            let Ok(mut track) = TrackValue::parse(&value, Some(&info)) else {
+                continue;
+            };
+            let is_legacy_list = track.movement.as_ref().is_some_and(|movement| {
+                movement.name == SCRIPT_MODE_NAME
+                    && movement.parameters.first().copied() == Some(0.0)
+                    && movement.parameters.len() >= 3
+            });
+            if !is_legacy_list {
+                continue;
+            }
+            let segment_count = track.values.len().saturating_sub(1).max(1);
+            let mut ids = track.segment_curve_ids(SCRIPT_MODE_NAME, segment_count, 1);
+            if ids.is_empty() {
+                continue;
+            }
+            while ids.len() < segment_count {
+                let fill = *ids.last().unwrap_or(&1);
+                ids.push(fill);
+            }
+            ids.truncate(segment_count);
+            let assignment = registry::create_assignment(ids);
+            track.set_movement(
+                SCRIPT_MODE_NAME,
+                vec![
+                    (ASSIGNMENT_PARAM_OFFSET + assignment) as f64,
+                    registry::nonce() as f64,
+                ],
+            );
+            if edit
+                .set_effect_item_value(effect, &item.name, &track.to_string())
+                .is_ok()
+            {
+                migrated += 1;
+            }
+        }
+    }
+    Ok(migrated)
+}
+
 /// グループ化されたトラックバー(色のRGB、XYZなど)にも同じカーブを適用する。
 fn apply_to_track_with_group(
     edit: &EditSection,
@@ -239,7 +298,11 @@ fn apply_to_track_with_group(
     item: &str,
     curve_id: u64,
     segment: Option<usize>,
+    group_apply: bool,
 ) -> bool {
+    if !group_apply {
+        return apply_to_track(edit, object, effect, item, curve_id, segment);
+    }
     let info = track_info(edit, effect, item).ok();
     let group_name = info.as_ref().and_then(|info| info.group_name.clone());
     let group_num = info.as_ref().map_or(1, |info| info.group_num);
@@ -284,25 +347,32 @@ fn apply_to_track(
 
     let info = track_info(edit, effect, item).ok();
     let current_value = edit.get_effect_item_value(effect, item).ok();
-    let mut track = current_value
-        .as_deref()
-        .and_then(|value| TrackValue::parse(value, info.as_ref()).ok())
-        .unwrap_or_else(|| {
-            let start = edit
-                .get_effect_track_value(effect, item, start_f)
-                .unwrap_or(0.0);
-            let end = edit
-                .get_effect_track_value(effect, item, end_f)
-                .unwrap_or(start);
-            TrackValue {
-                values: vec![start, end],
-                precision: 2,
-                flag: 0,
-                movement: None,
-                time_control: None,
-                reference: None,
+    let mut track = if let Some(value) = current_value.as_deref() {
+        match TrackValue::parse(value, info.as_ref()) {
+            Ok(track) => track,
+            Err(error) => {
+                // 解析できない値を 2 点に置き換えると中間点が失われるため、
+                // このトラックへの適用を中止する。
+                tracing::warn!("Failed to parse track value for {item}: {error}; value={value:?}");
+                return false;
             }
-        });
+        }
+    } else {
+        let start = edit
+            .get_effect_track_value(effect, item, start_f)
+            .unwrap_or(0.0);
+        let end = edit
+            .get_effect_track_value(effect, item, end_f)
+            .unwrap_or(start);
+        TrackValue {
+            values: vec![start, end],
+            precision: 2,
+            flag: 0,
+            movement: None,
+            time_control: None,
+            reference: None,
+        }
+    };
 
     // 移動方法を持たないトラックバーは値が1点だけなので、開始点と終了点の
     // 2点に複製してカーブを適用できるようにする。
@@ -316,7 +386,17 @@ fn apply_to_track(
         track.ensure_two_points(start, end);
     }
 
+    // 参照式付きトラックは、移動方法だけを差し替えると参照式が優先されて
+    // 意図しない値になるため、破壊を避けて適用を中止する。
+    if track.reference.is_some() {
+        tracing::warn!("Cannot apply HL_Ezing to reference track: {item}");
+        return false;
+    }
+
     // 中間点ごとに区切るため、「中間点無視」と時間制御リンクを解除する。
+    if track.time_control.is_some() {
+        tracing::warn!("Clearing time control data for {item}");
+    }
     track.enable_midpoints();
 
     let nonce = registry::nonce();
@@ -348,14 +428,18 @@ fn apply_to_track(
     segment_ids.truncate(segment_count);
 
     match segment {
-        Some(index) if index < segment_ids.len() => segment_ids[index] = curve_id,
-        _ => segment_ids.fill(curve_id),
+        Some(index) => {
+            // 区間数がトラックとオブジェクトでずれる場合があるため、
+            // 単一適用では必ず1区間だけを変更する。
+            let index = index.min(segment_ids.len() - 1);
+            segment_ids[index] = curve_id;
+        }
+        None => segment_ids.fill(curve_id),
     }
 
-    let assignment_id = match existing_assignment {
-        Some(id) if registry::set_assignment(id, segment_ids.clone()) => id,
-        _ => registry::create_assignment(segment_ids.clone()),
-    };
+    // 割り当ては immutable に扱う。複製オブジェクトや Undo で
+    // 別トラックの区間マッピングまで変わらないように、適用ごとに新しい ID を発行する。
+    let assignment_id = registry::create_assignment(segment_ids.clone());
 
     track.set_movement(
         SCRIPT_MODE_NAME,
