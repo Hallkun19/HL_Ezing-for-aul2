@@ -69,7 +69,7 @@ impl TrackValue {
         {
             let params = &movement.parameters;
             if params.first().copied() == Some(0.0) && params.len() >= 3 {
-                ids = params[1..params.len() - 1]
+                ids = params[2..]
                     .iter()
                     .map(|value| *value as u64)
                     .filter(|id| *id > 0)
@@ -394,7 +394,7 @@ mod tests {
     fn segment_ids_from_new_list_format() {
         let track = TrackValue::parse(
             "0.00,50.00,100.00,HL_Ezing,0",
-            Some(&info("HL_Ezing", vec![0.0, 3.0, 4.0, 17.0], false)),
+            Some(&info("HL_Ezing", vec![0.0, 17.0, 3.0, 4.0], false)),
         )
         .unwrap();
         assert_eq!(track.segment_curve_ids("HL_Ezing", 2, 9), vec![3, 4]);

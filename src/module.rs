@@ -31,4 +31,12 @@ impl HlEzingModule {
             .map(|c| c.evaluate(t))
             .unwrap_or(t))
     }
+
+    /// 区間割り当てIDと区間番号から、使用するカーブIDを返す。
+    /// 見つからない場合は 0（線形フォールバック）を返す。
+    fn getsegment(&self, assignment_id: f64, index: f64) -> aviutl2::AnyResult<f64> {
+        let id = assignment_id.max(0.0) as u64;
+        let index = index.max(0.0) as usize;
+        Ok(crate::curve::registry::assignment_curve(id, index).unwrap_or(0) as f64)
+    }
 }

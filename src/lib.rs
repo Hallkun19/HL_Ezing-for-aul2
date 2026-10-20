@@ -100,6 +100,20 @@ impl aviutl2::generic::GenericPlugin for HlEzingPlugin {
             }
         }
 
+        match project.deserialize::<Vec<(u64, Vec<u64>)>>(curve::apply::ASSIGNMENTS_KEY) {
+            Ok(entries) => {
+                curve::registry::load_assignments(entries);
+                tracing::info!(
+                    "Loaded {} segment assignments from project.",
+                    curve::registry::assignment_snapshot().len()
+                );
+            }
+            Err(e) => {
+                curve::registry::load_assignments(Vec::new());
+                tracing::info!("No segment assignments in project ({e}).");
+            }
+        }
+
         // 旧バージョンでは保存していないため、無い場合は「最後のカーブなし」。
         if let Ok(id) = project.deserialize::<u64>(curve::apply::LAST_APPLIED_KEY)
             && curve::registry::contains(id)
@@ -121,12 +135,35 @@ impl aviutl2::generic::GenericPlugin for HlEzingPlugin {
         if let Err(e) = project.serialize(curve::apply::LAST_APPLIED_KEY, &last_applied) {
             tracing::warn!("Failed to save last applied curve: {e}");
         }
+        let assignments = curve::registry::assignment_snapshot();
+        if let Err(e) = project.serialize(curve::apply::ASSIGNMENTS_KEY, &assignments) {
+            tracing::warn!("Failed to save segment assignments: {e}");
+        }
     }
 
     fn on_clear_cache(&mut self, _edit_section: &aviutl2::generic::EditSection) {
         // カーブデータはプロジェクト内に保持しており、キャッシュ破棄の影響は受けない。
         tracing::debug!("Cache cleared.");
     }
+
+    // 区間バーの更新はポーリングせず、AviUtl2 のイベントで通知する。
+    // イベントスレッドでは EditHandle を呼べないため、WebView へ
+    // 「更新が必要」とだけ伝え、実際の取得は JS 側から IPC で行う。
+    fn event_change_edit_frame(&mut self) {
+        notify_segments_dirty();
+    }
+
+    fn event_change_focus_object(&mut self) {
+        notify_segments_dirty();
+    }
+
+    fn event_update_object_info(&mut self) {
+        notify_segments_dirty();
+    }
+}
+
+fn notify_segments_dirty() {
+    window::evaluate("window.hlEzing && window.hlEzing.onEvent({event:'segments_dirty'})".into());
 }
 
 impl HlEzingPlugin {

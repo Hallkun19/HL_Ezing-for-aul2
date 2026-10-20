@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState, useCallback, useLayoutEffe
 import { createRoot } from "react-dom/client";
 import {
   MdCenterFocusWeak,
+  MdChevronLeft,
+  MdChevronRight,
   MdClose,
   MdRefresh,
   MdSwapVert,
@@ -404,55 +406,80 @@ function IdInput({ value, onCommit }) {
     return () => clearTimeout(timer);
   }, [text, commit]);
 
+  const step = (delta) => {
+    const current = Number(textRef.current) || value || 1;
+    commit(current + delta);
+  };
+
   return (
-    <input
-      className="id-input"
-      type="number"
-      min="1"
-      max="999999"
-      step="1"
-      value={text}
-      title="カーブID（数値入力または左右ドラッグで変更）"
-      onChange={(e) => updateText(e.target.value)}
-      onBlur={() => commit(textRef.current)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          commit(textRef.current);
-          e.currentTarget.blur();
-        }
-      }}
-      onPointerDown={(e) => {
-        drag.current = {
-          x: e.clientX,
-          value: Number(text) || value || 1,
-        };
-        e.currentTarget.setPointerCapture(e.pointerId);
-      }}
-      onPointerMove={(e) => {
-        if (!drag.current) return;
-        const delta = e.clientX - drag.current.x;
-        if (Math.abs(delta) < 4) return;
-        e.preventDefault();
-        updateText(
-          String(
-            clamp(
-              drag.current.value + Math.round(delta / 4),
-              1,
-              999999
+    <div className="id-control">
+      <button
+        type="button"
+        className="id-step"
+        title="カーブIDを1減らす"
+        aria-label="カーブIDを1減らす"
+        onClick={() => step(-1)}
+      >
+        <MdChevronLeft />
+      </button>
+      <input
+        className="id-input"
+        type="number"
+        min="1"
+        max="999999"
+        step="1"
+        value={text}
+        title="カーブID（数値入力、左右ドラッグ、矢印ボタンで変更）"
+        onChange={(e) => updateText(e.target.value)}
+        onBlur={() => commit(textRef.current)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            commit(textRef.current);
+            e.currentTarget.blur();
+          }
+        }}
+        onPointerDown={(e) => {
+          drag.current = {
+            x: e.clientX,
+            value: Number(text) || value || 1,
+          };
+          e.currentTarget.setPointerCapture(e.pointerId);
+        }}
+        onPointerMove={(e) => {
+          if (!drag.current) return;
+          const delta = e.clientX - drag.current.x;
+          if (Math.abs(delta) < 4) return;
+          e.preventDefault();
+          updateText(
+            String(
+              clamp(
+                drag.current.value + Math.round(delta / 4),
+                1,
+                999999
+              )
             )
-          )
-        );
-      }}
-      onPointerUp={() => {
-        if (!drag.current) return;
-        drag.current = null;
-        commit(textRef.current);
-      }}
-      onPointerCancel={() => {
-        drag.current = null;
-        updateText(value == null ? "" : String(value));
-      }}
-    />
+          );
+        }}
+        onPointerUp={() => {
+          if (!drag.current) return;
+          drag.current = null;
+          commit(textRef.current);
+        }}
+        onPointerCancel={() => {
+          drag.current = null;
+          updateText(value == null ? "" : String(value));
+        }}
+      />
+      <button
+        type="button"
+        className="id-step"
+        title="カーブIDを1増やす"
+        aria-label="カーブIDを1増やす"
+        onClick={() => step(1)}
+      >
+        <MdChevronRight />
+      </button>
+    </div>
   );
 }
 
@@ -1325,7 +1352,6 @@ function SegmentBar({ segments, onSelect }) {
           );
         })}
       </div>
-      <span className="segment-hint">シークバーの区間</span>
     </div>
   );
 }
@@ -1531,6 +1557,7 @@ function App() {
   const applyDragRef = useRef(null);
   const suppressApplyClickRef = useRef(false);
   const applyDragResetTimer = useRef(null);
+  const segmentsTimer = useRef(null);
 
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -1630,6 +1657,17 @@ function App() {
   const handleEvent = useCallback(
     (event) => {
       if (!event || !event.event) return;
+
+      if (event.event === "segments_dirty") {
+        // AviUtl2 側でシークバーや区間が動いたときだけ届く。
+        // 連続移動に備えて少しだけまとめてから取得する。
+        if (segmentsTimer.current) clearTimeout(segmentsTimer.current);
+        segmentsTimer.current = setTimeout(() => {
+          segmentsTimer.current = null;
+          post({ cmd: "get_segments" });
+        }, 120);
+        return;
+      }
 
       if (event.event === "curves") {
         const list = Array.isArray(event.curves) ? event.curves : [];
@@ -1803,13 +1841,7 @@ function App() {
     post({ cmd: "get_segments" });
   }, [handleEvent, post]);
 
-  // シークバーを動かしたときに区間バーの選択状態を追従させる。
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (!document.hidden) post({ cmd: "get_segments" });
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [post]);
+
 
   // エディタの変更をアクティブIDへ反映する。少し遅延させることで
   // ドラッグ中の連続IPCを抑えつつ、トラック側は即座に追従する。
@@ -2043,6 +2075,9 @@ function App() {
     () => () => {
       if (applyDragResetTimer.current) {
         clearTimeout(applyDragResetTimer.current);
+      }
+      if (segmentsTimer.current) {
+        clearTimeout(segmentsTimer.current);
       }
     },
     []

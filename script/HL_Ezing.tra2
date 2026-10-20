@@ -1,14 +1,15 @@
---param:Curve ID,0
+--param:AssignmentID,0
 --param:Nonce,0
 --information:HL_Ezing curve evaluator by halkun19
 
+local ASSIGNMENT_OFFSET = 1000000000
+
 local gp = obj.getpoint
-local params = { gp("param") }
+local raw_id, nonce = gp("param")
 
 local idx, t = math.modf(gp("index"))
 local num = gp("num")
 if num and num > 1 then
-    -- 最終区間の端で idx + 1 が範囲外にならないようにする
     if idx < 0 then
         idx, t = 0, 0
     elseif idx >= num - 1 then
@@ -16,23 +17,19 @@ if num and num > 1 then
     end
 end
 
-local curve_id
-local nonce
-if params[1] == 0 and #params >= 3 then
-    -- 区間IDリスト形式: [0, id0, id1, ..., nonce]
-    local id_count = #params - 2
-    local id_index = idx + 1
-    if id_index < 1 then
-        id_index = 1
-    elseif id_index > id_count then
-        id_index = id_count
+local curve_id = raw_id
+if raw_id and raw_id >= ASSIGNMENT_OFFSET then
+    local module = obj.module("HL_Ezing.aux2") or obj.module("HL_Ezing")
+    if module and module.getsegment then
+        local id = module.getsegment(raw_id - ASSIGNMENT_OFFSET, idx)
+        if id and id > 0 then
+            curve_id = id
+        else
+            curve_id = 0
+        end
+    else
+        curve_id = 0
     end
-    curve_id = params[1 + id_index]
-    nonce = params[#params] or 0
-else
-    -- 旧形式: [curve_id, nonce]
-    curve_id = params[1]
-    nonce = params[2] or 0
 end
 
 if curve_id == nil then
@@ -41,11 +38,11 @@ end
 
 local st = gp(idx)
 local ed = gp(idx + 1)
-local m = obj.module("HL_Ezing.aux2") or obj.module("HL_Ezing")
-if not m or not m.getcurve then
+local module = obj.module("HL_Ezing.aux2") or obj.module("HL_Ezing")
+if not module or not module.getcurve then
     return st + (ed - st) * t
 end
-local v = m.getcurve(curve_id, nonce or 0, t)
+local v = module.getcurve(curve_id, nonce or 0, t)
 if v == nil then
     return st + (ed - st) * t
 end

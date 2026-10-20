@@ -20,6 +20,11 @@ pub const SCRIPT_MODE_NAME: &str = "HL_Ezing";
 pub const PROJECT_KEY: &str = "hl_ezing_curves";
 /// 最後に適用したカーブIDのプロジェクト保存用キー。
 pub const LAST_APPLIED_KEY: &str = "hl_ezing_last_applied";
+/// 区間ごとのカーブID割り当てのプロジェクト保存用キー。
+pub const ASSIGNMENTS_KEY: &str = "hl_ezing_segment_assignments";
+/// 区間割り当てIDを通常のカーブIDと区別するためのオフセット。
+/// カーブIDの入力上限は 999999 なので、10億以上は割り当てIDとみなせる。
+const ASSIGNMENT_PARAM_OFFSET: u64 = 1_000_000_000;
 
 /// 指定またはフォーカスされている単一のトラックバーだけにカーブを適用する。
 /// `target_effect` / `target_effect_index` / `target_item` が指定されている場合は、
@@ -316,19 +321,52 @@ fn apply_to_track(
 
     let nonce = registry::nonce();
     let segment_count = track.values.len().saturating_sub(1).max(1);
-    let mut segment_ids = track.segment_curve_ids(SCRIPT_MODE_NAME, segment_count, curve_id);
+
+    // 既存の割り当てID(負のパラメータ)があれば、その区間リストを引き継ぐ。
+    let existing_assignment = track.movement.as_ref().and_then(|movement| {
+        if movement.name != SCRIPT_MODE_NAME {
+            return None;
+        }
+        movement
+            .parameters
+            .first()
+            .copied()
+            .filter(|value| *value >= ASSIGNMENT_PARAM_OFFSET as f64)
+            .map(|value| (value as u64).saturating_sub(ASSIGNMENT_PARAM_OFFSET))
+    });
+
+    let mut segment_ids = existing_assignment
+        .and_then(registry::assignment)
+        .unwrap_or_else(|| track.segment_curve_ids(SCRIPT_MODE_NAME, segment_count, curve_id));
+    if segment_ids.is_empty() {
+        segment_ids.push(curve_id);
+    }
+    while segment_ids.len() < segment_count {
+        let fill = *segment_ids.last().unwrap_or(&curve_id);
+        segment_ids.push(fill);
+    }
+    segment_ids.truncate(segment_count);
+
     match segment {
         Some(index) if index < segment_ids.len() => segment_ids[index] = curve_id,
         _ => segment_ids.fill(curve_id),
     }
-    let mut params = Vec::with_capacity(segment_ids.len() + 2);
-    params.push(0.0); // 区間IDリスト形式の目印
-    params.extend(segment_ids.iter().map(|id| *id as f64));
-    params.push(nonce as f64);
-    track.set_movement(SCRIPT_MODE_NAME, params);
+
+    let assignment_id = match existing_assignment {
+        Some(id) if registry::set_assignment(id, segment_ids.clone()) => id,
+        _ => registry::create_assignment(segment_ids.clone()),
+    };
+
+    track.set_movement(
+        SCRIPT_MODE_NAME,
+        vec![
+            (ASSIGNMENT_PARAM_OFFSET + assignment_id) as f64,
+            nonce as f64,
+        ],
+    );
     let value = track.to_string();
     tracing::debug!(
-        "Apply curve {curve_id} to {item} (segment {:?}, ids {:?}): {value}",
+        "Apply curve {curve_id} to {item} (segment {:?}, assignment {assignment_id}, ids {:?}): {value}",
         segment,
         segment_ids
     );

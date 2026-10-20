@@ -19,6 +19,9 @@ const NO_LAST_APPLIED: u64 = u64::MAX;
 pub struct CurveRegistry {
     curves: HashMap<u64, Arc<Curve>>,
     next_id: u64,
+    /// トラックバーごとの区間IDリスト。キーは負のIDとしてトラックに埋め込む。
+    assignments: HashMap<u64, Vec<u64>>,
+    next_assignment: u64,
 }
 
 impl Default for CurveRegistry {
@@ -27,6 +30,8 @@ impl Default for CurveRegistry {
             curves: HashMap::new(),
             // 0 は「カーブなし」として扱われるため、必ず 1 から始める。
             next_id: 1,
+            assignments: HashMap::new(),
+            next_assignment: 1,
         }
     }
 }
@@ -78,6 +83,61 @@ impl CurveRegistry {
         self.curves.get(&id).cloned()
     }
 
+    /// 区間IDリストを新しい割り当てとして登録する。
+    pub fn create_assignment(&mut self, segment_ids: Vec<u64>) -> u64 {
+        if self.next_assignment == 0 {
+            self.next_assignment = 1;
+        }
+        let id = self.next_assignment;
+        self.next_assignment = self.next_assignment.saturating_add(1);
+        self.assignments.insert(id, segment_ids);
+        id
+    }
+
+    /// 既存の割り当てを差し替える。
+    pub fn set_assignment(&mut self, id: u64, segment_ids: Vec<u64>) -> bool {
+        if let Some(slot) = self.assignments.get_mut(&id) {
+            *slot = segment_ids;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn assignment(&self, id: u64) -> Option<Vec<u64>> {
+        self.assignments.get(&id).cloned()
+    }
+
+    pub fn assignment_curve(&self, id: u64, index: usize) -> Option<u64> {
+        self.assignments
+            .get(&id)
+            .and_then(|ids| ids.get(index).copied())
+    }
+
+    pub fn assignment_snapshot(&self) -> Vec<(u64, Vec<u64>)> {
+        let mut entries = self
+            .assignments
+            .iter()
+            .map(|(id, ids)| (*id, ids.clone()))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(id, _)| *id);
+        entries
+    }
+
+    pub fn load_assignments(&mut self, entries: Vec<(u64, Vec<u64>)>) {
+        self.assignments.clear();
+        self.next_assignment = 1;
+        for (id, ids) in entries {
+            self.assignments.insert(id, ids);
+            if id >= self.next_assignment {
+                self.next_assignment = id.saturating_add(1);
+            }
+        }
+        if self.next_assignment == 0 {
+            self.next_assignment = 1;
+        }
+    }
+
     /// プロジェクト保存用。ID順に並べて返す。
     pub fn snapshot(&self) -> Vec<(u64, Curve)> {
         let mut entries = self
@@ -93,6 +153,8 @@ impl CurveRegistry {
     pub fn load(&mut self, entries: Vec<(u64, Curve)>) {
         self.curves.clear();
         self.next_id = 1;
+        self.assignments.clear();
+        self.next_assignment = 1;
         for (id, curve) in entries {
             self.curves.insert(id, Arc::new(curve));
             if id >= self.next_id {
@@ -107,6 +169,8 @@ impl CurveRegistry {
     pub fn clear(&mut self) {
         self.curves.clear();
         self.next_id = 1;
+        self.assignments.clear();
+        self.next_assignment = 1;
     }
 }
 
@@ -145,6 +209,30 @@ pub fn get(id: u64) -> Option<Arc<Curve>> {
 pub fn nonce() -> u64 {
     static NONCE: AtomicU64 = AtomicU64::new(1);
     NONCE.fetch_add(1, Ordering::Relaxed)
+}
+
+pub fn create_assignment(segment_ids: Vec<u64>) -> u64 {
+    registry().write().unwrap().create_assignment(segment_ids)
+}
+
+pub fn set_assignment(id: u64, segment_ids: Vec<u64>) -> bool {
+    registry().write().unwrap().set_assignment(id, segment_ids)
+}
+
+pub fn assignment(id: u64) -> Option<Vec<u64>> {
+    registry().read().unwrap().assignment(id)
+}
+
+pub fn assignment_curve(id: u64, index: usize) -> Option<u64> {
+    registry().read().unwrap().assignment_curve(id, index)
+}
+
+pub fn assignment_snapshot() -> Vec<(u64, Vec<u64>)> {
+    registry().read().unwrap().assignment_snapshot()
+}
+
+pub fn load_assignments(entries: Vec<(u64, Vec<u64>)>) {
+    registry().write().unwrap().load_assignments(entries);
 }
 
 pub fn snapshot() -> Vec<(u64, Curve)> {
@@ -207,6 +295,21 @@ mod tests {
         assert!(!registry.register_with_id(5, Curve::Bezier(default_bezier())));
         assert!(registry.contains(5));
         assert_eq!(registry.register(Curve::Bezier(default_bezier())), 6);
+    }
+
+    #[test]
+    fn assignments_keep_segment_ids_and_reload() {
+        let mut registry = CurveRegistry::default();
+        let id = registry.create_assignment(vec![3, 4, 5]);
+        assert_eq!(registry.assignment(id), Some(vec![3, 4, 5]));
+        assert!(registry.set_assignment(id, vec![6, 7]));
+        assert_eq!(registry.assignment_curve(id, 1), Some(7));
+        let snapshot = registry.assignment_snapshot();
+        let mut loaded = CurveRegistry::default();
+        loaded.load_assignments(snapshot);
+        assert_eq!(loaded.assignment(id), Some(vec![6, 7]));
+        let next = loaded.create_assignment(vec![1]);
+        assert!(next > id);
     }
 
     #[test]
