@@ -33,7 +33,7 @@ pub struct BezierPoint {
         skip_serializing_if = "Option::is_none"
     )]
     pub out_bounce: Option<BounceParams>,
-    /// 左右のハンドルを点対称に連動させるか。
+    /// 左右のハンドルを反対方向に連動させるか。長さは独立。
     ///
     /// 古いデータにはこの項目がないため、読み込み時に既存の形状から推測する。
     #[serde(
@@ -213,14 +213,23 @@ fn finite_or(value: f64, fallback: f64) -> f64 {
     if value.is_finite() { value } else { fallback }
 }
 
-/// 左右のハンドルがアンカーを中心に点対称かどうか。
-fn handles_are_symmetric(point: &BezierPoint) -> bool {
+/// 左右のハンドルがアンカーを挟んで反対向きかどうか。
+///
+/// 統合状態では向きだけを揃え、長さは左右で独立してよい。
+fn handles_are_collinear(point: &BezierPoint) -> bool {
     let [anchor_x, anchor_y] = point.anchor;
     let in_dx = point.in_handle[0] - anchor_x;
     let in_dy = point.in_handle[1] - anchor_y;
     let out_dx = point.out_handle[0] - anchor_x;
     let out_dy = point.out_handle[1] - anchor_y;
-    (in_dx + out_dx).abs() < 1e-6 && (in_dy + out_dy).abs() < 1e-6
+    let in_len = in_dx.hypot(in_dy);
+    let out_len = out_dx.hypot(out_dy);
+    if in_len < 1e-9 || out_len < 1e-9 {
+        return false;
+    }
+    let cross = in_dx * out_dy - in_dy * out_dx;
+    let dot = in_dx * out_dx + in_dy * out_dy;
+    cross.abs() < 1e-6 * in_len * out_len && dot < 0.0
 }
 
 fn sanitize_bezier(mut data: BezierData) -> BezierData {
@@ -293,41 +302,51 @@ fn sanitize_bezier(mut data: BezierData) -> BezierData {
         let anchor_y = data.points[index].anchor[1];
         let point = &mut data.points[index];
 
-        // 古いデータには handlesLinked がない。既に点対称なら統合、
-        // 非対称なら分離として引き継ぎ、既存カーブの形を変えない。
+        // 古いデータには handlesLinked がない。既に向きが反対なら統合、
+        // そうでなければ分離として引き継ぎ、既存カーブの形を変えない。
         let linked = point
             .handles_linked
-            .unwrap_or_else(|| index > 0 && index < last_index && handles_are_symmetric(point));
+            .unwrap_or_else(|| index > 0 && index < last_index && handles_are_collinear(point));
         point.handles_linked = Some(linked);
 
         if linked && index > 0 && index < last_index {
-            // 統合時は左右を完全な点対称にし、前後のアンカー範囲へ
-            // はみ出す場合は両方を同じ比率で縮める。片方だけをclampすると
-            // ハンドルがアンカーに埋まったり、角度がずれたりする。
-            let mut vx = point.out_handle[0] - anchor_x;
-            let mut vy = point.out_handle[1] - anchor_y;
-            if vx < 0.0 {
-                vx = 0.0;
-            }
-            if vx.abs() < f64::EPSILON && vy.abs() < f64::EPSILON {
-                vx = (anchor_x - point.in_handle[0]).max(0.0);
-                vy = anchor_y - point.in_handle[1];
-            }
+            // 統合時は向きだけを反対に揃える。長さは左右で独立して保持し、
+            // 前後のアンカー範囲を超えた側だけを短縮する。
+            let out_dx = point.out_handle[0] - anchor_x;
+            let out_dy = point.out_handle[1] - anchor_y;
+            let in_dx = point.in_handle[0] - anchor_x;
+            let in_dy = point.in_handle[1] - anchor_y;
+            let mut out_len = out_dx.hypot(out_dy);
+            let mut in_len = in_dx.hypot(in_dy);
 
-            let max_dx = (anchor_x - prev_x).min(next_x - anchor_x).max(0.0);
-            let max_dy = (10.0 - anchor_y.abs()).max(0.0);
-            let mut scale = 1.0_f64;
-            if vx.abs() > max_dx && vx.abs() > 0.0 {
-                scale = scale.min(max_dx / vx.abs());
+            let (ux, uy) = if out_len > 1e-9 && out_dx >= -1e-9 {
+                (out_dx / out_len, out_dy / out_len)
+            } else if in_len > 1e-9 && in_dx <= 1e-9 {
+                (-in_dx / in_len, -in_dy / in_len)
+            } else {
+                out_len = 0.0;
+                in_len = 0.0;
+                (0.0, 0.0)
+            };
+
+            if out_len == 0.0 && in_len == 0.0 {
+                point.out_handle = [anchor_x, anchor_y];
+                point.in_handle = [anchor_x, anchor_y];
+            } else {
+                if ux > 1e-9 {
+                    out_len = out_len.min(((next_x - anchor_x) / ux).max(0.0));
+                    in_len = in_len.min(((anchor_x - prev_x) / ux).max(0.0));
+                }
+                if uy.abs() > 1e-9 {
+                    let max_y = ((10.0 - anchor_y.abs()) / uy.abs()).max(0.0);
+                    out_len = out_len.min(max_y);
+                    in_len = in_len.min(max_y);
+                }
+                out_len = out_len.max(0.0);
+                in_len = in_len.max(0.0);
+                point.out_handle = [anchor_x + ux * out_len, anchor_y + uy * out_len];
+                point.in_handle = [anchor_x - ux * in_len, anchor_y - uy * in_len];
             }
-            if vy.abs() > max_dy && vy.abs() > 0.0 {
-                scale = scale.min(max_dy / vy.abs());
-            }
-            if !scale.is_finite() {
-                scale = 0.0;
-            }
-            point.out_handle = [anchor_x + vx * scale, anchor_y + vy * scale];
-            point.in_handle = [anchor_x - vx * scale, anchor_y - vy * scale];
         } else {
             point.in_handle[0] = point.in_handle[0].clamp(prev_x, anchor_x);
             point.out_handle[0] = point.out_handle[0].clamp(anchor_x, next_x);
@@ -400,25 +419,62 @@ mod tests {
     }
 
     #[test]
-    fn linked_handles_stay_symmetric_when_clamped() {
+    fn linked_handles_keep_direction_and_independent_lengths() {
         let data = BezierData {
             points: vec![
                 point([0.0, 0.0], [0.0, 0.0], [0.0, 0.0]),
-                point([0.5, 0.5], [-0.2, 0.0], [1.2, 1.0]),
+                point([0.5, 0.5], [0.3, 0.5], [1.2, 0.5]),
                 point([1.0, 1.0], [1.0, 1.0], [1.0, 1.0]),
             ],
         };
         let sanitized = sanitize_bezier(data);
         let middle = &sanitized.points[1];
         assert_eq!(middle.handles_linked, Some(true));
-        assert!((middle.in_handle[0] + middle.out_handle[0] - 1.0).abs() < 1e-9);
-        assert!((middle.in_handle[1] + middle.out_handle[1] - 1.0).abs() < 1e-9);
-        assert!(middle.in_handle[0] >= 0.0 && middle.out_handle[0] <= 1.0);
+        // 外側だけが境界(1.0)に合わせて短縮され、内側の長さは維持される。
+        assert!((middle.out_handle[0] - 1.0).abs() < 1e-9);
+        assert!((middle.in_handle[0] - 0.3).abs() < 1e-9);
+        assert!((middle.out_handle[1] - 0.5).abs() < 1e-9);
+        assert!((middle.in_handle[1] - 0.5).abs() < 1e-9);
     }
 
     #[test]
-    fn legacy_asymmetric_handles_are_treated_as_split() {
-        let mut middle = point([0.5, 0.5], [0.2, 0.2], [0.9, 0.9]);
+    fn linked_handle_at_anchor_keeps_the_other_handle() {
+        let data = BezierData {
+            points: vec![
+                point([0.0, 0.0], [0.0, 0.0], [0.0, 0.0]),
+                point([0.5, 0.5], [0.2, 0.5], [0.5, 0.5]),
+                point([1.0, 1.0], [1.0, 1.0], [1.0, 1.0]),
+            ],
+        };
+        let sanitized = sanitize_bezier(data);
+        let middle = &sanitized.points[1];
+        assert!((middle.out_handle[0] - 0.5).abs() < 1e-9);
+        assert!((middle.out_handle[1] - 0.5).abs() < 1e-9);
+        assert!((middle.in_handle[0] - 0.2).abs() < 1e-9);
+        assert!((middle.in_handle[1] - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn legacy_collinear_unequal_handles_are_linked() {
+        let mut middle = point([0.5, 0.5], [0.2, 0.5], [0.9, 0.5]);
+        middle.handles_linked = None;
+        let data = BezierData {
+            points: vec![
+                point([0.0, 0.0], [0.0, 0.0], [0.0, 0.0]),
+                middle,
+                point([1.0, 1.0], [1.0, 1.0], [1.0, 1.0]),
+            ],
+        };
+        let sanitized = sanitize_bezier(data);
+        let middle = &sanitized.points[1];
+        assert_eq!(middle.handles_linked, Some(true));
+        assert!((middle.in_handle[0] - 0.2).abs() < 1e-9);
+        assert!((middle.out_handle[0] - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn legacy_non_collinear_handles_are_treated_as_split() {
+        let mut middle = point([0.5, 0.5], [0.2, 0.4], [0.9, 0.9]);
         middle.handles_linked = None;
         let data = BezierData {
             points: vec![

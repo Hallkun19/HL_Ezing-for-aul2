@@ -700,6 +700,17 @@ button:active {
   color: #c8c8c8;
 }
 
+.modal-content label.settings-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.modal-content label.settings-check input[type="checkbox"] {
+  width: auto;
+  accent-color: var(--accent-color);
+}
+
 .modal-content input[type="text"],
 .modal-content input[type="number"],
 .modal-content select {

@@ -134,7 +134,15 @@ pub fn apply_to_item(
     item: &str,
     curve_id: u64,
 ) -> Result<(), String> {
-    apply_to_item_on_object(edit, object, effect_name, effect_index, item, curve_id)
+    apply_to_item_on_object(
+        edit,
+        object,
+        effect_name,
+        effect_index,
+        item,
+        curve_id,
+        false,
+    )
 }
 
 /// オブジェクトを明示して1本のトラックバーへ適用する。
@@ -149,6 +157,7 @@ pub fn apply_to_item_on_object(
     effect_index: usize,
     item: &str,
     curve_id: u64,
+    group_apply: bool,
 ) -> Result<(), String> {
     let effect = edit
         .find_effect(object, effect_name, effect_index)
@@ -157,7 +166,7 @@ pub fn apply_to_item_on_object(
         return Err("対象のトラックバーが見つかりません。".into());
     }
     let segment = Some(focus_segment(edit).unwrap_or(0));
-    if apply_to_track_with_group(edit, object, effect, item, curve_id, segment, false) {
+    if apply_to_track_with_group(edit, object, effect, item, curve_id, segment, group_apply) {
         Ok(())
     } else {
         Err("トラックバーの移動方法を書き換えられませんでした。".into())

@@ -15,9 +15,10 @@
 /feedback
 how_to_make_aul2_plugin.md
 マスター指示.txt
-/docs
 
 
 # OS / System
 .DS_Store
 Thumbs.db
+
+AUDIT*.md

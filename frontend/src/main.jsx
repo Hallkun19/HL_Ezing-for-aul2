@@ -82,11 +82,18 @@ function handlesAreLinked(point) {
   if (point.handlesLinked === true) return true;
   if (point.handlesLinked === false) return false;
   // 古いプリセットなど、フラグがないデータは実際の形状から推測する。
+  // 統合は「向きが反対」であることだけを意味し、長さは一致しなくてよい。
   const [anchorX, anchorY] = point.anchor;
-  return (
-    Math.abs(point.inHandle[0] + point.outHandle[0] - 2 * anchorX) < 1e-6 &&
-    Math.abs(point.inHandle[1] + point.outHandle[1] - 2 * anchorY) < 1e-6
-  );
+  const inX = point.inHandle[0] - anchorX;
+  const inY = point.inHandle[1] - anchorY;
+  const outX = point.outHandle[0] - anchorX;
+  const outY = point.outHandle[1] - anchorY;
+  const inLen = Math.hypot(inX, inY);
+  const outLen = Math.hypot(outX, outY);
+  if (inLen < 1e-9 || outLen < 1e-9) return false;
+  const cross = inX * outY - inY * outX;
+  const dot = inX * outX + inY * outY;
+  return Math.abs(cross) < 1e-6 * inLen * outLen && dot < 0;
 }
 
 function isEditableTarget(target) {
@@ -143,6 +150,8 @@ function sanitizeSettings(value) {
     presetPanelSize: clamp(Number(value?.presetPanelSize) || 200, 60, 2000),
     presetBoxSize: clamp(Number(value?.presetBoxSize) || 78, 40, 140),
     showPresetPanel: value?.showPresetPanel !== false,
+    dragDropEnabled: value?.dragDropEnabled !== false,
+    groupApplyOnDrop: value?.groupApplyOnDrop === true,
     compactMode: true,
     gridLinesX: clamp(Number(value?.gridLinesX) || 4, 1, 50),
     gridLinesY: clamp(Number(value?.gridLinesY) || 4, 1, 50),
@@ -379,28 +388,46 @@ function clampHandles(points) {
     const [anchorX, anchorY] = p.anchor;
 
     if (i > 0 && i < lastIndex && handlesAreLinked(p)) {
-      // 統合時は左右を完全な点対称にする。前後のアンカー範囲に
-      // はみ出す場合は、両方を同じ比率で縮めて角度と長さを保つ。
-      let vx = p.outHandle[0] - anchorX;
-      let vy = p.outHandle[1] - anchorY;
-      if (vx < 0) vx = 0;
-      if (Math.abs(vx) < 1e-12 && Math.abs(vy) < 1e-12) {
-        vx = Math.max(0, anchorX - p.inHandle[0]);
-        vy = anchorY - p.inHandle[1];
+      // 統合時は向きだけを反対に揃える。長さは左右で独立して保持し、
+      // 前後のアンカー範囲を超えた側だけを短縮する。
+      const outX = p.outHandle[0] - anchorX;
+      const outY = p.outHandle[1] - anchorY;
+      const inX = p.inHandle[0] - anchorX;
+      const inY = p.inHandle[1] - anchorY;
+      let outLen = Math.hypot(outX, outY);
+      let inLen = Math.hypot(inX, inY);
+      let ux = 0;
+      let uy = 0;
+
+      if (outLen > 1e-9 && outX >= -1e-9) {
+        ux = outX / outLen;
+        uy = outY / outLen;
+      } else if (inLen > 1e-9 && inX <= 1e-9) {
+        ux = -inX / inLen;
+        uy = -inY / inLen;
+      } else {
+        outLen = 0;
+        inLen = 0;
       }
 
-      const maxDx = Math.max(0, Math.min(anchorX - prevX, nextX - anchorX));
-      const maxDy = Math.max(0, 10 - Math.abs(anchorY));
-      let scale = 1;
-      if (Math.abs(vx) > maxDx && Math.abs(vx) > 0) {
-        scale = Math.min(scale, maxDx / Math.abs(vx));
+      if (outLen === 0 && inLen === 0) {
+        p.outHandle = [anchorX, anchorY];
+        p.inHandle = [anchorX, anchorY];
+      } else {
+        if (ux > 1e-9) {
+          outLen = Math.min(outLen, Math.max(0, (nextX - anchorX) / ux));
+          inLen = Math.min(inLen, Math.max(0, (anchorX - prevX) / ux));
+        }
+        if (Math.abs(uy) > 1e-9) {
+          const maxY = Math.max(0, 10 - Math.abs(anchorY)) / Math.abs(uy);
+          outLen = Math.min(outLen, maxY);
+          inLen = Math.min(inLen, maxY);
+        }
+        outLen = Math.max(0, outLen);
+        inLen = Math.max(0, inLen);
+        p.outHandle = [anchorX + ux * outLen, anchorY + uy * outLen];
+        p.inHandle = [anchorX - ux * inLen, anchorY - uy * inLen];
       }
-      if (Math.abs(vy) > maxDy && Math.abs(vy) > 0) {
-        scale = Math.min(scale, maxDy / Math.abs(vy));
-      }
-      if (!Number.isFinite(scale)) scale = 0;
-      p.outHandle = [anchorX + vx * scale, anchorY + vy * scale];
-      p.inHandle = [anchorX - vx * scale, anchorY - vy * scale];
     } else {
       if (p.inHandle) {
         p.inHandle[0] = clamp(p.inHandle[0], prevX, anchorX);
@@ -1062,10 +1089,21 @@ function Graph({ state, setState, settings, onCommitEdit }) {
       p[isIn ? "inHandle" : "outHandle"] = handleValue;
       if (linked) {
         const other = isIn ? "outHandle" : "inHandle";
-        p[other] = [
-          2 * p.anchor[0] - handleValue[0],
-          2 * p.anchor[1] - handleValue[1],
-        ];
+        const dx = handleValue[0] - p.anchor[0];
+        const dy = handleValue[1] - p.anchor[1];
+        const length = Math.hypot(dx, dy);
+        const otherLength = Math.hypot(
+          p[other][0] - p.anchor[0],
+          p[other][1] - p.anchor[1]
+        );
+        if (length > 1e-9) {
+          p[other] = [
+            p.anchor[0] - (dx / length) * otherLength,
+            p.anchor[1] - (dy / length) * otherLength,
+          ];
+        }
+        // 掴んでいるハンドルがアンカー上にあるときは、反対側を
+        // アンカーへ巻き込まない。方向が決まらないだけで、長さは独立。
       }
       clampHandles(pts);
       setState((s) => ({ ...s, bezierData: { points: pts } }));
@@ -1568,6 +1606,22 @@ function SettingsPanelModal({ open, onClose, settings, setSettings, onDebug }) {
   return (
     <AnimatedModal open={open} onClose={onClose} title="設定">
       <div className="modal-content settings-content">
+        <label className="settings-check">
+          <input
+            type="checkbox"
+            checked={settings.dragDropEnabled !== false}
+            onChange={(e) => update("dragDropEnabled", e.target.checked)}
+          />
+          ドラッグ&ドロップ適用を有効にする
+        </label>
+        <label className="settings-check">
+          <input
+            type="checkbox"
+            checked={settings.groupApplyOnDrop === true}
+            onChange={(e) => update("groupApplyOnDrop", e.target.checked)}
+          />
+          X/Y/Zなどのグループ項目へまとめて適用（D&D）
+        </label>
         <label>
           プリセットパネル位置
           <select
@@ -2377,7 +2431,13 @@ function App() {
   // 「適用」ボタンのクリックは従来どおりピッカーを開き、数ピクセル以上
   // ドラッグした場合だけ AviUtl2 のトラックバーへのドロップを開始する。
   const beginApplyDrag = (e) => {
-    if (e.button !== 0 || activeIdRef.current == null) return;
+    if (
+      e.button !== 0 ||
+      activeIdRef.current == null ||
+      settings.dragDropEnabled === false
+    ) {
+      return;
+    }
     if (applyDragResetTimer.current) {
       clearTimeout(applyDragResetTimer.current);
       applyDragResetTimer.current = null;
@@ -2400,6 +2460,7 @@ function App() {
   };
 
   const moveApplyDrag = (e) => {
+    if (settings.dragDropEnabled === false) return;
     const drag = applyDragRef.current;
     if (!drag || drag.started || (e.buttons & 1) === 0) return;
     if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 6) return;
@@ -2407,7 +2468,11 @@ function App() {
     suppressApplyClickRef.current = true;
     setTrackPicker(null);
     setDraggingToTrackbar(true);
-    post({ cmd: "start_drag", curve_id: activeIdRef.current });
+    post({
+      cmd: "start_drag",
+      curve_id: activeIdRef.current,
+      group_apply: settings.groupApplyOnDrop === true,
+    });
   };
 
   const endApplyDrag = (e) => {
@@ -2624,7 +2689,9 @@ function App() {
               title={
                 activeId == null
                   ? "カーブIDを作成してください"
-                  : "クリックで適用先を選択 / ドラッグでトラックバーへ適用"
+                  : settings.dragDropEnabled === false
+                    ? "クリックで適用先を選択（ドラッグ&ドロップは設定で無効）"
+                    : "クリックで適用先を選択 / ドラッグでトラックバーへ適用"
               }
             >
               <MdPlayArrow /> {draggingToTrackbar ? "ドロップ" : "適用"}

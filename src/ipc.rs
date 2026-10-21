@@ -250,6 +250,10 @@ fn handle_start_drag(value: &serde_json::Value) {
         );
         return;
     }
+    let group_apply = value
+        .get("group_apply")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
     if !crate::trackbar::is_supported() {
         send_event(serde_json::json!({
             "event": "drag_started",
@@ -259,7 +263,7 @@ fn handle_start_drag(value: &serde_json::Value) {
         }));
         return;
     }
-    if !crate::trackbar::start_drag(id) {
+    if !crate::trackbar::start_drag(id, group_apply) {
         send_event(serde_json::json!({
             "event": "drag_started",
             "ok": false,

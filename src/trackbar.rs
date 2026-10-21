@@ -1101,7 +1101,11 @@ fn resolve_descriptor(
     candidates.into_iter().nth(target.effect_rank)
 }
 
-pub fn apply_target(target: &TrackBarTarget, curve_id: u64) -> Result<(), String> {
+pub fn apply_target(
+    target: &TrackBarTarget,
+    curve_id: u64,
+    group_apply: bool,
+) -> Result<(), String> {
     if !crate::ipc::EDIT_HANDLE.is_ready() {
         return Err("編集セクションの初期化が完了していません。".into());
     }
@@ -1153,6 +1157,7 @@ pub fn apply_target(target: &TrackBarTarget, curve_id: u64) -> Result<(), String
                     descriptor.effect_index,
                     &descriptor.item,
                     curve_id,
+                    group_apply,
                 );
             }
         }
@@ -1167,7 +1172,7 @@ pub fn apply_target(target: &TrackBarTarget, curve_id: u64) -> Result<(), String
 /// ドラッグ開始を受け付け、左ボタンが離された位置のトラックバーへ適用する。
 /// 実際のスキャンと適用はワーカースレッドで行うため、WebView の IPC を
 /// ブロックしない。
-pub fn start_drag(curve_id: u64) -> bool {
+pub fn start_drag(curve_id: u64, group_apply: bool) -> bool {
     if layout_profile(version()).is_none() || vtables().is_none() {
         tracing::warn!("HL_Ezing drag: unsupported AviUtl2 version or unresolved RTTI");
         return false;
@@ -1179,7 +1184,7 @@ pub fn start_drag(curve_id: u64) -> bool {
     warm_cache();
     std::thread::spawn(move || {
         let _guard = DragGuard;
-        let result = std::panic::catch_unwind(|| monitor_drag(curve_id))
+        let result = std::panic::catch_unwind(|| monitor_drag(curve_id, group_apply))
             .unwrap_or_else(|_| Err("ドラッグ処理中にエラーが発生しました。".to_string()));
         if let Err(message) = result {
             tracing::warn!("HL_Ezing drag cancelled: {message}");
@@ -1201,7 +1206,7 @@ impl Drop for DragGuard {
     }
 }
 
-fn monitor_drag(curve_id: u64) -> Result<(), String> {
+fn monitor_drag(curve_id: u64, group_apply: bool) -> Result<(), String> {
     if !crate::curve::registry::contains(curve_id) {
         return Err("指定されたカーブIDが存在しません。".into());
     }
@@ -1283,7 +1288,7 @@ fn monitor_drag(curve_id: u64) -> Result<(), String> {
         }
     };
     let target = &targets[hit.0];
-    apply_target(target, curve_id)?;
+    apply_target(target, curve_id, group_apply)?;
     crate::curve::registry::set_last_applied(curve_id);
     let curve = crate::curve::registry::get(curve_id);
     crate::ipc::send_event(json!({
