@@ -1786,6 +1786,7 @@ function App() {
   const applyWrapRef = useRef(null);
   const [pickerMaxHeight, setPickerMaxHeight] = useState(200);
   const [trackPicker, setTrackPicker] = useState(null);
+  const multiApplyRef = useRef(false);
   const [segments, setSegments] = useState({ frames: [], focus: null, layerFrame: null });
   const [draggingToTrackbar, setDraggingToTrackbar] = useState(false);
   const applyDragRef = useRef(null);
@@ -2010,7 +2011,9 @@ function App() {
       if (!event || !event.event) return;
 
       if (event.event === "object_changed") {
-        setTrackPicker(null);
+        // Shift+クリックで連続適用している間は、適用による
+        // オブジェクト更新通知でピッカーを閉じない。
+        if (!multiApplyRef.current) setTrackPicker(null);
         post({ cmd: "get_segments" });
         return;
       }
@@ -2350,7 +2353,10 @@ function App() {
 
   // トラックピッカー外部クリックで閉じる
   useEffect(() => {
-    if (!trackPicker) return;
+    if (!trackPicker) {
+      multiApplyRef.current = false;
+      return;
+    }
     const close = (e) => {
       if (!e.target.closest(".apply-wrap")) setTrackPicker(null);
     };
@@ -2397,6 +2403,7 @@ function App() {
       notify("先にカーブIDを作成してください。", "error");
       return;
     }
+    multiApplyRef.current = false;
     clearTracksRequest();
 
     const onTracks = (e) => {
@@ -2709,6 +2716,7 @@ function App() {
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
+                      multiApplyRef.current = e.shiftKey;
                       doApply(t.item, t.effect, t.effect_index);
                       if (!e.shiftKey) setTrackPicker(null);
                     }}
@@ -2723,6 +2731,7 @@ function App() {
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation();
+                    multiApplyRef.current = e.shiftKey;
                     doApply(null);
                     if (!e.shiftKey) setTrackPicker(null);
                   }}
