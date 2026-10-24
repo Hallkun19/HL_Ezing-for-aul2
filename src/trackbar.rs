@@ -109,7 +109,10 @@ const LAYOUT_2_1_X: LayoutProfile = LayoutProfile {
 fn layout_profile(version: u32) -> Option<&'static LayoutProfile> {
     // 動作確認済みの範囲だけを許可する。未知のバージョンでは
     // 誤ったレイアウトで別の行を指すより、D&D を無効化する。
-    if (2_010_300..=2_011_499).contains(&version) {
+    // 2.1.15 は 2.1.14 と同じ UI レイアウト。クラス名と RTTI は
+    // 2.1.15 のバイナリでも確認済み。将来レイアウトが変わった場合は
+    // この範囲を広げず、新しい LayoutProfile を追加する。
+    if (2_010_300..=2_011_500).contains(&version) {
         Some(&LAYOUT_2_1_X)
     } else {
         None

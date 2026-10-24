@@ -1,7 +1,7 @@
 [project]
 id = "halkun19.HL_Ezing"
 name = "HL_Ezing"
-version = "1.2.2"
+version = "1.2.3"
 
 [development]
 aviutl2_version = "latest"
